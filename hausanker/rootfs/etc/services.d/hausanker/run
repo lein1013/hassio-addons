@@ -1,0 +1,27 @@
+#!/usr/bin/with-contenv bashio
+# shellcheck shell=bash
+# ==============================================================================
+# Start HausAnker: ingress UI (8099, http) + WebXR (8443, https)
+# ==============================================================================
+CERT="/ssl/$(bashio::config 'certfile')"
+KEY="/ssl/$(bashio::config 'keyfile')"
+MODE="ssl-ordner"
+
+if [[ ! -f "${CERT}" || ! -f "${KEY}" ]]; then
+    bashio::log.warning "Kein Zertifikat unter ${CERT} gefunden – erzeuge selbstsigniertes Zertifikat."
+    CERT=/data/selfsigned.crt
+    KEY=/data/selfsigned.key
+    MODE="selbstsigniert"
+    if [[ ! -f "${CERT}" ]]; then
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout "${KEY}" -out "${CERT}" \
+            -subj "/CN=hausanker.local" \
+            -addext "subjectAltName=DNS:homeassistant.local,DNS:homeassistant,DNS:hausanker.local" \
+            >/dev/null 2>&1
+    fi
+fi
+
+bashio::log.info "Zertifikat: ${MODE} (${CERT})"
+bashio::log.info "WebXR-URL: https://<HA-Adresse>:8443/  (Admin-Seite: HA-Seitenleiste -> HausAnker)"
+
+exec python3 -u /app/server.py --cert "${CERT}" --key "${KEY}" --cert-mode "${MODE}"

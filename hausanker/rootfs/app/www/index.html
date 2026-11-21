@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HausAnker XR – Minimaltest</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --ink:#1d2128; --muted:#69707d; --line:#dde1e6; --accent:#2f6fde; --ok:#2b8a3e; --bad:#c92a2a; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111418; --card:#1b1f25; --ink:#e7e9ec; --muted:#9aa1ad; --line:#2c323b; --accent:#5b8ff0; --ok:#51cf66; --bad:#ff6b6b; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 18px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  .card h2 { font-size:15px; margin:0 0 10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  table { width:100%; border-collapse:collapse; font-size:15px; }
+  td { padding:4px 0; vertical-align:top; } td:first-child { color:var(--muted); width:46%; }
+  .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; }
+  button, a.btn { display:inline-block; font:inherit; border:0; border-radius:10px; padding:12px 18px; background:var(--accent); color:#fff; cursor:pointer; text-decoration:none; }
+  button.big { width:100%; font-size:20px; padding:18px; }
+  button.ghost, a.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  textarea { width:100%; font:inherit; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--ink); resize:vertical; }
+  .swatches { display:flex; gap:10px; margin:10px 0 0; }
+  .swatch { width:34px; height:34px; border-radius:8px; border:3px solid transparent; cursor:pointer; padding:0; }
+  .swatch.on { border-color: var(--ink); }
+  ul#notes { list-style:none; padding:0; margin:0; }
+  ul#notes li { display:flex; align-items:center; gap:10px; padding:8px 0; border-top:1px solid var(--line); }
+  ul#notes li:first-child { border-top:0; }
+  .chip { width:14px; height:14px; border-radius:3px; flex:none; }
+  .grow { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .meta { color:var(--muted); font-size:13px; }
+  .links a { word-break: break-all; }
+  .hint { color:var(--muted); font-size:14px; }
+  kbd { border:1px solid var(--line); border-bottom-width:2px; border-radius:4px; padding:0 5px; font-size:13px; }
+  #xr-canvas { position:fixed; inset:0; display:none; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>HausAnker XR</h1>
+  <p class="sub">Minimaltest: virtuelle Post-its mit persistenten WebXR-Ankern</p>
+
+  <section class="card" id="open-card" hidden>
+    <h2>WebXR öffnen</h2>
+    <p id="open-reason" class="hint"></p>
+    <div class="links" id="links"></div>
+  </section>
+
+  <section class="card">
+    <h2>Status</h2>
+    <table>
+      <tr><td>App-Version</td><td id="s-version">…</td></tr>
+      <tr><td>Zugang</td><td id="s-via">…</td></tr>
+      <tr><td>Zertifikat</td><td id="s-cert">…</td></tr>
+      <tr><td>Sicherer Kontext (HTTPS)</td><td id="s-secure">…</td></tr>
+      <tr><td>WebXR immersive-ar</td><td id="s-xr">…</td></tr>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Post-it</h2>
+    <textarea id="note-text" rows="2" placeholder="Text für neue Post-its, z. B. „Waschmaschine: Programm 40° Eco“"></textarea>
+    <div class="swatches" id="swatches"></div>
+    <p style="margin:16px 0 0"><button class="big" id="start-ar" disabled>AR starten</button></p>
+    <p class="hint" style="margin-bottom:0">
+      Im Headset: <kbd>Trigger</kbd> / Pinch = Post-it setzen (auf erkannten Flächen, sonst 40 cm vor dem Controller) ·
+      <kbd>Grip</kbd> nahe einem Post-it = löschen · <kbd>A</kbd>/<kbd>X</kbd> = Raum-Scan ein/aus ·
+      <kbd>B</kbd>/<kbd>Y</kbd> = nächste Farbe. Status-Anzeige hängt am linken Controller.
+    </p>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px">
+      <h2 style="margin:0">Gespeicherte Post-its <span id="count"></span></h2>
+      <div class="row">
+        <button class="ghost" id="reload">Neu laden</button>
+        <button class="ghost" id="clear">Alle löschen</button>
+      </div>
+    </div>
+    <ul id="notes"></ul>
+    <p class="hint" id="anchor-hint">⚓ = persistenter Anker (max. 8 pro Website im Quest-Browser). Persistente Anker im Headset entfernst du per <kbd>Grip</kbd> in AR; „Alle löschen“ hier löscht nur die Daten.</p>
+  </section>
+</main>
+<canvas id="xr-canvas"></canvas>
+<script type="module" src="app.js"></script>
+</body>
+</html>
