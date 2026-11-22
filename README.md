@@ -1,9 +1,8 @@
-# HausAnker Apps für Home Assistant
+# Home Notes XR – Home-Assistant-App
 
-App-Repository (Branch `hausanker`). In Home Assistant hinzufügen:
+Post-its und Video-Anleitungen in Mixed Reality (Meta Quest), verwaltet in Home Assistant.
 
-```
-https://github.com/lein1013/hassio-addons#hausanker
-```
-
-- **HausAnker XR** – WebXR-Minimaltest: virtuelle Post-its mit persistenten Ankern für Meta Quest.
+| Branch | Zweck | Repository-URL in Home Assistant |
+|---|---|---|
+| `hausanker` | Freigegebene Version | `https://github.com/lein1013/hassio-addons#hausanker` |
+| `develop` | Testversion vor der Abnahme | `https://github.com/lein1013/hassio-addons#develop` |

@@ -3,6 +3,6 @@
 # Take down the S6 supervision tree when the service fails
 # ==============================================================================
 if [[ "$1" -ne 0 ]] && [[ "$1" -ne 256 ]]; then
-  bashio::log.warning "HausAnker beendet mit Fehler – App wird gestoppt"
+  bashio::log.warning "Home Notes XR beendet mit Fehler – App wird gestoppt"
   exec /run/s6/basedir/bin/halt
 fi

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Notes XR</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header class="top">
+    <div>
+      <h1>Home Notes XR</h1>
+      <p class="sub">Post-its und Video-Anleitungen in deiner Wohnung</p>
+    </div>
+    <div class="chips" id="chips"></div>
+  </header>
+
+  <section class="card xr" id="xr-card">
+    <div class="xr-row">
+      <div class="xr-text">
+        <h2>Mixed Reality</h2>
+        <p id="xr-status" class="hint">Prüfe WebXR…</p>
+      </div>
+      <button class="primary big" id="start-ar" hidden>AR starten</button>
+    </div>
+    <div id="xr-options" hidden>
+      <label class="check"><input type="checkbox" id="use-scan"> Raum-Scan verwenden (Notizen haften an Wänden/Möbeln – braucht eingerichtete Räume)</label>
+      <div class="row">
+        <button class="ghost" id="grant">Kamera &amp; Mikrofon freigeben</button>
+        <span class="hint" id="grant-status"></span>
+      </div>
+      <details class="help">
+        <summary>Steuerung im Headset</summary>
+        <table>
+          <tr><td>Trigger / Pinch</td><td>Notiz setzen (nächste aus der Warteschlange) · auf Notiz: abhaken · auf Video: Play/Pause</td></tr>
+          <tr><td>Grip halten</td><td>Notiz greifen und verschieben (Stick: näher/weiter)</td></tr>
+          <tr><td>Rechter Stick</td><td>Abstand der Vorschau (ohne Raum-Scan)</td></tr>
+          <tr><td>A halten</td><td>Diktieren – auf Notiz: Text ersetzen, sonst: Text für die nächste Notiz</td></tr>
+          <tr><td>B zweimal</td><td>Notiz/Video löschen, auf das du zeigst</td></tr>
+          <tr><td>X</td><td>Video-Anleitung aufnehmen / stoppen, danach mit Trigger platzieren</td></tr>
+          <tr><td>Y</td><td>Farbe wechseln (auf Notiz: deren Farbe)</td></tr>
+          <tr><td>Linker Stick drücken</td><td>Raum-Scan-Anzeige ein/aus</td></tr>
+        </table>
+      </details>
+    </div>
+    <div id="xr-links" hidden></div>
+  </section>
+
+  <section class="card">
+    <h2>Neue Notiz</h2>
+    <form id="new-form" class="new">
+      <div class="new-main">
+        <textarea id="new-text" rows="2" placeholder="z. B. „Wasserfilter im März tauschen“" required></textarea>
+        <button type="button" class="ghost mic" id="new-mic" hidden title="Diktieren (gedrückt halten)">🎙</button>
+      </div>
+      <div class="row">
+        <input id="new-location" placeholder="Ort (optional), z. B. Küche">
+        <div class="swatches" id="new-colors"></div>
+        <button class="primary" type="submit">Anlegen</button>
+      </div>
+      <p class="hint">Neue Notizen landen in der Warteschlange und werden im Headset mit dem Trigger platziert.</p>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="toolbar">
+      <div class="tabs" id="type-tabs">
+        <button data-type="all" class="on">Alle</button>
+        <button data-type="note">Post-its</button>
+        <button data-type="video">Videos</button>
+      </div>
+      <div class="tabs" id="status-tabs">
+        <button data-status="open" class="on">Offen</button>
+        <button data-status="done">Erledigt</button>
+        <button data-status="all">Alle</button>
+      </div>
+      <input id="search" type="search" placeholder="Suchen…">
+    </div>
+    <div id="summary" class="hint"></div>
+    <div id="grid" class="grid"></div>
+  </section>
+</main>
+<canvas id="xr-canvas"></canvas>
+<script type="module" src="dashboard.js"></script>
+</body>
+</html>
