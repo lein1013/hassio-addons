@@ -1,6 +1,6 @@
 ---
 name: HausAnker XR
-version: "0.1.0"
+version: "0.1.1"
 slug: hausanker
 description: >-
   WebXR-Minimaltest für Meta Quest – virtuelle Post-its mit persistenten Ankern

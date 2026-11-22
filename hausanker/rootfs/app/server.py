@@ -16,10 +16,11 @@ import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 WWW = os.environ.get("HAUSANKER_WWW", "/app/www")
 DATA_FILE = os.environ.get("HAUSANKER_DATA", "/data/notes.json")
-INGRESS_PEER = "172.30.32.2"
+# Ingress port is not mapped to the host; only containers on the hassio network reach it
+INGRESS_NET = ("172.30.32.", "172.30.33.")
 
 _lock = threading.Lock()
 CERT_MODE = "unbekannt"
@@ -68,7 +69,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def _allowed(self):
-        if self.server.label == "ingress" and self.client_address[0] != INGRESS_PEER:
+        if self.server.label == "ingress" and not self.client_address[0].startswith(INGRESS_NET):
             self.send_error(403, "Nur über Home-Assistant-Ingress erreichbar")
             return False
         return True
