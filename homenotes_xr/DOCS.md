@@ -27,7 +27,10 @@ Abstand mit dem rechten Stick).
 Abkürzungen: A halten = diktieren · B 2× = löschen · Grip = greifen · X = Video · Y = Farbe ·
 linken Stick drücken = Karte.
 
-**Ohne Raum-Scan (Standard):** keine Raumeinrichtung, keine Begrenzung nötig.
+**Bewegungsbereich „Ganze Wohnung“ (Standard):** keine Begrenzung, du kannst frei durch alle Räume gehen.
+Falls die Quest trotzdem eine Begrenzung verlangt: unter „Erweitert“ prüfen, ob „Ganze Wohnung“ gewählt ist,
+oder im Entwicklermodus der Quest die Begrenzung ausschalten.
+**Ohne Raum-Scan (Standard):** keine Raumeinrichtung nötig.
 **Mit Raum-Scan** (unter „Erweitert“): Notizen haften an Wänden und Möbeln, Wände erscheinen auf der Karte.
 
 ## Video-Anleitungen

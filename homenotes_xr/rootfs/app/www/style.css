@@ -72,3 +72,5 @@ textarea { width: 100%; resize: vertical; }
 .map svg { width: 100%; height: auto; max-height: 520px; display: block; background: var(--soft); border-radius: 10px; }
 .map .empty { padding: 30px; }
 .note.flash { outline: 3px solid var(--accent); }
+.help label { display: block; margin-top: 8px; }
+.help label select { display: block; margin-top: 4px; max-width: 100%; }

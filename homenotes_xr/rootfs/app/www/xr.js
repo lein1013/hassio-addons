@@ -51,21 +51,35 @@ export function primeAudio() { speech.prime(); }
 export async function startXR(opts) {
   st.opts = opts;
   if (!renderer) initThree();
-  const refType = opts.floor ? 'local-floor' : 'local';
-  renderer.xr.setReferenceSpaceType(refType);
+  // „unbounded“ = Bewegen in der ganzen Wohnung: Der Quest-Browser blendet dann keine
+  // Begrenzung (Guardian) ein. Anker legen wir trotzdem im „local“-Raum an (robuster).
+  const wanted = opts.space || 'unbounded';
   const optionalFeatures = ['anchors', 'hand-tracking'];
+  if (wanted === 'unbounded') optionalFeatures.push('unbounded');
   if (opts.useScan) optionalFeatures.push('hit-test', 'plane-detection', 'mesh-detection');
   const session = await navigator.xr.requestSession('immersive-ar', {
-    requiredFeatures: opts.floor ? ['local-floor'] : [],
+    requiredFeatures: wanted === 'local-floor' ? ['local-floor'] : [],
     optionalFeatures,
   });
   st.session = session;
+  let refType = wanted;
+  if (wanted === 'unbounded') {
+    try { await session.requestReferenceSpace('unbounded'); } catch (e) {
+      refType = 'local';
+      remoteLog('warn', `Raum „unbounded“ nicht verfügbar (${e.message}) – nutze „local“`);
+    }
+  }
+  renderer.xr.setReferenceSpaceType(refType);
   await renderer.xr.setSession(session);
   st.refSpace = renderer.xr.getReferenceSpace();
+  st.refType = refType;
+  st.anchorSpace = refType === 'unbounded'
+    ? await session.requestReferenceSpace('local').catch(() => st.refSpace)
+    : st.refSpace;
   setLogSink((level, msg) => { st.hud.msg = msg.slice(0, 120); st.hud.dirty = true; });
 
   const feats = session.enabledFeatures ? [...session.enabledFeatures] : [];
-  remoteLog('info', `AR gestartet (Raum: ${refType}, Scan ${opts.useScan ? 'an' : 'aus'}), Features: ${feats.join(', ') || '?'}`);
+  remoteLog('info', `AR gestartet (Raum: ${refType}${st.anchorSpace !== st.refSpace ? ', Anker in local' : ''}, Scan ${opts.useScan ? 'an' : 'aus'}), Features: ${feats.join(', ') || '?'}`);
   for (const [ev, fn] of [['end', onEnd], ['select', onSelect], ['squeezestart', onSqueezeStart],
     ['squeezeend', onSqueezeEnd], ['inputsourceschange', setupHitTest]]) session.addEventListener(ev, fn);
   setupHitTest();
@@ -508,7 +522,16 @@ function attachToAnchor(frame, world) {
   st.anchors.set(id, entry);
   let promise;
   try {
-    promise = frame.createAnchor(new XRRigidTransform({ x: pos.x, y: pos.y, z: pos.z }, { x: q.x, y: q.y, z: q.z, w: q.w }), st.refSpace);
+    // Pose in den Anker-Raum umrechnen (bei „unbounded“ ist das der „local“-Raum)
+    let ap = pos; let aq = q;
+    if (st.anchorSpace !== st.refSpace) {
+      const t = frame.getPose(st.refSpace, st.anchorSpace);
+      if (!t) throw new Error('Anker-Raum nicht verfügbar');
+      const m = new THREE.Matrix4().fromArray(t.transform.matrix).multiply(am);
+      ap = new THREE.Vector3(); aq = new THREE.Quaternion();
+      m.decompose(ap, aq, new THREE.Vector3());
+    }
+    promise = frame.createAnchor(new XRRigidTransform({ x: ap.x, y: ap.y, z: ap.z }, { x: aq.x, y: aq.y, z: aq.z, w: aq.w }), st.anchorSpace);
   } catch (e) {
     st.anchors.delete(id);
     remoteLog('warn', `createAnchor: ${e.message}`);
@@ -1180,7 +1203,7 @@ function drawHud() {
   if (st.recording) lines.push(`● REC ${fmtDuration((performance.now() - st.recording.started) / 1000)}`);
   if (st.dictation) lines.push('🎙 Höre zu…');
   if (st.uploads) lines.push(`⏫ Lade ${st.uploads} Video(s) hoch…`);
-  lines.push(next ? `Nächstes: ${next.label.slice(0, 50)}` : 'Warteschlange leer');
+  lines.push(next ? `Nächstes: ${next.label.slice(0, 50)}` : `Warteschlange leer · Raum: ${st.refType}`);
   lines.push(`› ${st.hud.msg}`);
   let y = 70;
   for (const l of lines) for (const part of wrapText(g, l, W - 36).slice(0, 3)) { if (y < H - 8) { g.fillText(part, 18, y); y += 24; } }

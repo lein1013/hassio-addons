@@ -39,7 +39,13 @@
       <details class="help">
         <summary>Erweitert</summary>
         <label class="check"><input type="checkbox" id="use-scan"> Raum-Scan verwenden (Notizen haften an Wänden/Möbeln, Wände erscheinen auf der Karte – die Quest fragt nach der Raumeinrichtung)</label>
-        <label class="check"><input type="checkbox" id="use-floor"> Boden-Referenz (local-floor) – nur nötig, falls Anker ohne nicht funktionieren; die Quest fragt dann nach einer Begrenzung</label>
+        <label>Bewegungsbereich
+          <select id="space-mode">
+            <option value="unbounded">Ganze Wohnung – ohne Begrenzung (empfohlen)</option>
+            <option value="local">Lokal – Quest-Begrenzung bleibt aktiv</option>
+            <option value="local-floor">Mit Boden-Referenz – Quest fragt nach Begrenzung</option>
+          </select>
+        </label>
       </details>
       <details class="help">
         <summary>Steuerung im Headset</summary>

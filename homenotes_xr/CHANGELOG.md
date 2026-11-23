@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Bewegungsbereich „Ganze Wohnung“ (WebXR-Referenzraum `unbounded`) als Standard: Der
+  Quest-Browser blendet keine Begrenzung ein, man kann sich frei durch die Wohnung bewegen.
+  Anker werden dabei im `local`-Raum angelegt. Auswahl unter „Erweitert“ (unbounded / local / local-floor).
+
 ## 0.3.0
 
 - Keine Raum-/Begrenzungsabfrage mehr: Standard-Referenzraum `local` statt `local-floor`

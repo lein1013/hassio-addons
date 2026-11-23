@@ -53,17 +53,17 @@ async function setupXR() {
     $('xr-status').textContent = 'Bereit. Notizen und Videos erscheinen dort, wo du sie platziert hast.';
     $('start-ar').hidden = false;
     $('xr-options').hidden = false;
-    for (const [id, key] of [['use-scan', 'homenotes.useScan'], ['use-floor', 'homenotes.useFloor']]) {
-      $(id).checked = localStorage.getItem(key) === '1';
-      $(id).onchange = () => localStorage.setItem(key, $(id).checked ? '1' : '0');
-    }
+    $('use-scan').checked = localStorage.getItem('homenotes.useScan') === '1';
+    $('use-scan').onchange = () => localStorage.setItem('homenotes.useScan', $('use-scan').checked ? '1' : '0');
+    $('space-mode').value = localStorage.getItem('homenotes.space') || 'unbounded';
+    $('space-mode').onchange = () => localStorage.setItem('homenotes.space', $('space-mode').value);
     $('grant').onclick = grantMedia;
     checkPermissions();
     $('start-ar').onclick = async () => {
       try {
         xrModule ??= await import('./xr.js');
         xrModule.primeAudio(); // in der Klick-Geste, sonst bleibt das Mikrofon stumm
-        await xrModule.startXR({ useScan: $('use-scan').checked, floor: $('use-floor').checked, onEnd: () => refresh() });
+        await xrModule.startXR({ useScan: $('use-scan').checked, space: $('space-mode').value, onEnd: () => refresh() });
       } catch (err) {
         remoteLog('error', `AR-Start fehlgeschlagen: ${err.message}`);
         alert(`AR konnte nicht starten: ${err.message}`);

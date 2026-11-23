@@ -23,7 +23,7 @@ import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 WWW = os.environ.get("HOMENOTES_WWW", "/app/www")
 DATA_FILE = os.environ.get("HOMENOTES_DATA", "/data/homenotes.json")
 MEDIA_DIR = os.environ.get("HOMENOTES_MEDIA", "/media/homenotes")
