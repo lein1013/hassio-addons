@@ -64,3 +64,11 @@ textarea { width: 100%; resize: vertical; }
 .note .actions button { padding: 5px 10px; font-size: 13px; }
 .empty { color: var(--muted); padding: 24px; text-align: center; grid-column: 1 / -1; }
 #xr-canvas { position: fixed; inset: 0; display: none; }
+
+.cam { display: grid; gap: 8px; }
+.cam select { display: block; margin-top: 4px; max-width: 100%; }
+.cam video { width: 240px; max-width: 100%; border-radius: 8px; background: #000; }
+.map { width: 100%; min-height: 120px; }
+.map svg { width: 100%; height: auto; max-height: 520px; display: block; background: var(--soft); border-radius: 10px; }
+.map .empty { padding: 30px; }
+.note.flash { outline: 3px solid var(--accent); }

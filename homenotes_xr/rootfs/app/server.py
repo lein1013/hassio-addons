@@ -23,7 +23,7 @@ import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 WWW = os.environ.get("HOMENOTES_WWW", "/app/www")
 DATA_FILE = os.environ.get("HOMENOTES_DATA", "/data/homenotes.json")
 MEDIA_DIR = os.environ.get("HOMENOTES_MEDIA", "/media/homenotes")
@@ -52,7 +52,39 @@ def load_db():
         db = {}
     db.setdefault("notes", [])
     db.setdefault("anchors", [])
+    db.setdefault("map", {"track": [], "walls": []})
     return db
+
+
+MAX_TRACK = 60000
+MAX_WALLS = 6000
+
+
+def merge_map(db, track, walls):
+    """Gelaufene Wege als 10-cm-Rasterzellen, Wände als Segmente (5-cm-gerundet) im Heimat-Koordinatensystem."""
+    m = db["map"]
+    cells = {(round(x * 10), round(z * 10)) for x, z in m["track"]}
+    for pt in track or []:
+        if len(pt) >= 2 and len(cells) < MAX_TRACK:
+            cells.add((round(float(pt[0]) * 10), round(float(pt[1]) * 10)))
+    m["track"] = [[cx / 10, cz / 10] for cx, cz in sorted(cells)]
+    seen = {tuple(w) for w in m["walls"]}
+    for w in walls or []:
+        if len(w) < 4 or len(seen) >= MAX_WALLS:
+            continue
+        a = (round(float(w[0]) * 20) / 20, round(float(w[1]) * 20) / 20)
+        b = (round(float(w[2]) * 20) / 20, round(float(w[3]) * 20) / 20)
+        if a == b:
+            continue
+        seg = a + b if a <= b else b + a
+        if seg not in seen:
+            seen.add(seg)
+            m["walls"].append(list(seg))
+
+
+def transform_xz(mat, x, z):
+    """Spaltenweise 4x4-Matrix (three.js/WebXR) auf Punkt (x, 0, z) anwenden."""
+    return (mat[0] * x + mat[8] * z + mat[12], mat[2] * x + mat[10] * z + mat[14])
 
 
 def save_db(db):
@@ -146,7 +178,7 @@ class Handler(SimpleHTTPRequestHandler):
     # ---- helpers -------------------------------------------------------
     def log_message(self, fmt, *args):
         path = self.path or ""
-        if path.startswith("/api/") and "/api/log" not in path and "/api/state" not in path:
+        if path.startswith("/api/") and not any(q in path for q in ("/api/log", "/api/state", "/api/map")):
             print(f"[http:{self.server.label}] {self.address_string()} {fmt % args}", flush=True)
 
     def end_headers(self):
@@ -203,7 +235,13 @@ class Handler(SimpleHTTPRequestHandler):
             })
         if route == "/api/state":
             with _lock:
-                return self._json(200, load_db())
+                db = load_db()
+            return self._json(200, {"notes": db["notes"], "anchors": db["anchors"]})
+        if route == "/api/map":
+            with _lock:
+                db = load_db()
+            return self._json(200, {**db["map"], "anchors": db["anchors"], "notes": [
+                {k: n.get(k) for k in ("id", "type", "text", "color", "done", "placement")} for n in db["notes"]]})
         if route.startswith("/media/"):
             return self._serve_media(route.rsplit("/", 1)[-1])
         if route.startswith("/api/"):
@@ -273,7 +311,8 @@ class Handler(SimpleHTTPRequestHandler):
             data = self._body()
             if not data.get("handle"):
                 return self._json(400, {"error": "handle fehlt"})
-            anchor = {"id": data.get("id") or new_id(), "handle": str(data["handle"]), "created": now()}
+            anchor = {"id": data.get("id") or new_id(), "handle": str(data["handle"]), "created": now(),
+                      "isHome": bool(data.get("isHome")), "home": data.get("home")}
             with _lock:
                 db = load_db()
                 db["anchors"] = [a for a in db["anchors"] if a["id"] != anchor["id"]] + [anchor]
@@ -282,6 +321,27 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, anchor)
         if route == "/api/media":
             return self._upload_media(query)
+        if route == "/api/map":
+            data = self._body()
+            with _lock:
+                db = load_db()
+                merge_map(db, data.get("track"), data.get("walls"))
+                save_db(db)
+            return self._json(200, {"track": len(db["map"]["track"]), "walls": len(db["map"]["walls"])})
+        if route == "/api/map/rebase":
+            # neuer Heimat-Ankerpunkt: alle Kartenpunkte mit der übergebenen Matrix umrechnen
+            mat = self._body().get("matrix")
+            if not isinstance(mat, list) or len(mat) != 16:
+                return self._json(400, {"error": "matrix (16 Werte) erwartet"})
+            with _lock:
+                db = load_db()
+                m = db["map"]
+                m["track"] = [list(transform_xz(mat, x, z)) for x, z in m["track"]]
+                m["walls"] = [list(transform_xz(mat, w[0], w[1]) + transform_xz(mat, w[2], w[3])) for w in m["walls"]]
+                merge_map(db, [], [])
+                save_db(db)
+            print("[map] Karte auf neuen Heimat-Ankerpunkt umgerechnet", flush=True)
+            return self._json(200, {"ok": True})
         if route == "/api/stt":
             wav = self._raw(20 * 1024 * 1024)
             if not wav:
@@ -301,6 +361,18 @@ class Handler(SimpleHTTPRequestHandler):
         route, _ = self._parts()
         if route.startswith("/api/notes/"):
             return self._upsert_note(route.rsplit("/", 1)[-1], self._body(), must_exist=True)
+        if route.startswith("/api/anchors/"):
+            anchor_id = route.rsplit("/", 1)[-1]
+            data = self._body()
+            with _lock:
+                db = load_db()
+                anchor = next((a for a in db["anchors"] if a["id"] == anchor_id), None)
+                if anchor is None:
+                    return self._json(404, {"error": "Ankerpunkt nicht gefunden"})
+                for key in ("home", "isHome") & data.keys():
+                    anchor[key] = data[key]
+                save_db(db)
+            return self._json(200, anchor)
         return self._json(404, {"error": "unbekannter Endpunkt"})
 
     def do_DELETE(self):
@@ -321,6 +393,13 @@ class Handler(SimpleHTTPRequestHandler):
                     pass
             print(f"[notes] gelöscht {note_id}", flush=True)
             return self._json(200, {"ok": True, "deleted": bool(note)})
+        if route == "/api/map":
+            with _lock:
+                db = load_db()
+                db["map"] = {"track": [], "walls": []}
+                save_db(db)
+            print("[map] Karte zurückgesetzt", flush=True)
+            return self._json(200, {"ok": True})
         if route.startswith("/api/anchors/"):
             anchor_id = route.rsplit("/", 1)[-1]
             with _lock:

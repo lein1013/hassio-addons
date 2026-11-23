@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0
+
+- Keine Raum-/Begrenzungsabfrage mehr: Standard-Referenzraum `local` statt `local-floor`
+  (Boden-Referenz und Raum-Scan optional unter „Erweitert“).
+- Video-Anleitungen: Kamera-Auswahl mit Live-Vorschau – die virtuelle Kamera der Quest liefert
+  in Mixed Reality nur Schwarz; die Passthrough-Kamera wird bevorzugt.
+- Aktionsleiste an jeder Notiz: ✓ abhaken, 🎙 sprechen, ✥ verschieben, 🎨 Farbe, 🗑 löschen;
+  bei Videos ▶, 🎙, ✥, 🗑. Bedienbar auch mit Handtracking.
+- Menü am linken Controller: ＋ Notiz, 🎙 Diktat, ● Video, 🗺 Karte, ▦ Scan-Anzeige.
+- Trigger ins Leere legt keine leeren Notizen mehr an – nur noch, was in der Warteschlange steht.
+- Hauskarte: gelaufene Wege (und mit Raum-Scan Wände) werden relativ zum Heimat-Ankerpunkt
+  gespeichert; Minimap oben rechts oder am rechten Controller, Draufsicht in der Übersicht.
+- Verlorene Ankerpunkte werden erkannt, ihre Notizen landen wieder in der Warteschlange.
+
 ## 0.2.0
 
 - Umbenannt in **Home Notes XR** (neuer Slug `homenotes_xr`, Daten starten leer).

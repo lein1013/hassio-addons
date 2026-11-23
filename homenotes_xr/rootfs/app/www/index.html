@@ -25,26 +25,46 @@
       <button class="primary big" id="start-ar" hidden>AR starten</button>
     </div>
     <div id="xr-options" hidden>
-      <label class="check"><input type="checkbox" id="use-scan"> Raum-Scan verwenden (Notizen haften an Wänden/Möbeln – braucht eingerichtete Räume)</label>
       <div class="row">
         <button class="ghost" id="grant">Kamera &amp; Mikrofon freigeben</button>
         <span class="hint" id="grant-status"></span>
       </div>
+      <div class="cam" id="cam-box" hidden>
+        <label>Kamera für Video-Anleitungen
+          <select id="camera-select"></select>
+        </label>
+        <video id="cam-preview" muted playsinline></video>
+        <p class="hint">Wähle die Kamera, die dein Zimmer zeigt. Die „virtuelle Kamera“ liefert in Mixed Reality nur Schwarz.</p>
+      </div>
+      <details class="help">
+        <summary>Erweitert</summary>
+        <label class="check"><input type="checkbox" id="use-scan"> Raum-Scan verwenden (Notizen haften an Wänden/Möbeln, Wände erscheinen auf der Karte – die Quest fragt nach der Raumeinrichtung)</label>
+        <label class="check"><input type="checkbox" id="use-floor"> Boden-Referenz (local-floor) – nur nötig, falls Anker ohne nicht funktionieren; die Quest fragt dann nach einer Begrenzung</label>
+      </details>
       <details class="help">
         <summary>Steuerung im Headset</summary>
         <table>
-          <tr><td>Trigger / Pinch</td><td>Notiz setzen (nächste aus der Warteschlange) · auf Notiz: abhaken · auf Video: Play/Pause</td></tr>
-          <tr><td>Grip halten</td><td>Notiz greifen und verschieben (Stick: näher/weiter)</td></tr>
-          <tr><td>Rechter Stick</td><td>Abstand der Vorschau (ohne Raum-Scan)</td></tr>
-          <tr><td>A halten</td><td>Diktieren – auf Notiz: Text ersetzen, sonst: Text für die nächste Notiz</td></tr>
-          <tr><td>B zweimal</td><td>Notiz/Video löschen, auf das du zeigst</td></tr>
-          <tr><td>X</td><td>Video-Anleitung aufnehmen / stoppen, danach mit Trigger platzieren</td></tr>
-          <tr><td>Y</td><td>Farbe wechseln (auf Notiz: deren Farbe)</td></tr>
-          <tr><td>Linker Stick drücken</td><td>Raum-Scan-Anzeige ein/aus</td></tr>
+          <tr><td>Menü am linken Controller</td><td>Mit dem rechten Strahl zeigen + Trigger: ＋ Notiz · 🎙 Diktat · ● Video · 🗺 Karte · ▦ Scan-Anzeige</td></tr>
+          <tr><td>Auf Notiz zeigen</td><td>Aktionsleiste erscheint: ✓ abhaken · 🎙 Text sprechen · ✥ verschieben · 🎨 Farbe · 🗑 löschen (2×)</td></tr>
+          <tr><td>Auf Video zeigen</td><td>▶ abspielen · 🎙 Titel · ✥ verschieben · 🗑 löschen</td></tr>
+          <tr><td>Trigger ins Leere</td><td>Nächstes aus der Warteschlange platzieren (Vorschau am Strahl)</td></tr>
+          <tr><td>Rechter Stick</td><td>Abstand der Vorschau / beim Verschieben näher-weiter</td></tr>
+          <tr><td>Abkürzungen</td><td>A halten: diktieren · B 2×: löschen · Grip: greifen · X: Video · Y: Farbe · linker Stick drücken: Karte</td></tr>
         </table>
       </details>
     </div>
     <div id="xr-links" hidden></div>
+  </section>
+
+  <section class="card" id="map-card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Hauskarte</h2>
+      <div class="row">
+        <span class="hint" id="map-stats"></span>
+        <button class="ghost" id="map-reset">Karte zurücksetzen</button>
+      </div>
+    </div>
+    <div id="map" class="map"></div>
   </section>
 
   <section class="card">

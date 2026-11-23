@@ -151,3 +151,43 @@ export function fmtDuration(sec) {
   const s = Math.round(sec);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
+
+// ------------------------------------------------------------------ Kamera-Auswahl
+// Die Quest meldet mehrere Kameras: die Passthrough-Kameras (echtes Bild) und eine
+// „virtuelle Kamera“ (Avatar vor schwarzem Hintergrund). Wir bevorzugen die Passthrough-Kamera.
+const CAMERA_KEY = 'homenotes.cameraId';
+
+export async function listCameras() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter((d) => d.kind === 'videoinput');
+}
+
+export function cameraScore(label = '') {
+  const l = label.toLowerCase();
+  let s = 0;
+  if (/passthrough|headset|rgb|world|environment|back|rear/.test(l)) s += 5;
+  if (/left|camera 0|\b0\b/.test(l)) s += 1;
+  if (/virtual|avatar|screen|cast|mixed reality capture|mrc/.test(l)) s -= 10;
+  return s;
+}
+
+export function savedCameraId() { return localStorage.getItem(CAMERA_KEY) || ''; }
+export function saveCameraId(id) { if (id) localStorage.setItem(CAMERA_KEY, id); else localStorage.removeItem(CAMERA_KEY); }
+
+export async function pickCameraId() {
+  const cams = await listCameras();
+  const saved = savedCameraId();
+  if (saved && cams.some((c) => c.deviceId === saved)) return { id: saved, cams, how: 'gespeichert' };
+  const best = [...cams].sort((a, b) => cameraScore(b.label) - cameraScore(a.label))[0];
+  return { id: best?.deviceId || '', cams, how: 'automatisch' };
+}
+
+export async function openCamera(withAudio) {
+  const { id, cams, how } = await pickCameraId();
+  const video = id
+    ? { deviceId: { exact: id }, width: { ideal: 1280 }, height: { ideal: 960 }, frameRate: { ideal: 30 } }
+    : { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 960 } };
+  const stream = await navigator.mediaDevices.getUserMedia({ video, audio: withAudio ? { echoCancellation: true, noiseSuppression: true } : false });
+  const label = stream.getVideoTracks()[0]?.label || '?';
+  return { stream, label, how, cams };
+}

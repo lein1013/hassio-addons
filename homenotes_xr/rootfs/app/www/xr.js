@@ -2,11 +2,12 @@
 //
 // Ankerpunkt-Prinzip: Der Quest-Browser erlaubt nur 8 persistente Anker pro Website.
 // Notizen hängen deshalb relativ an „Ankerpunkten“; ein neuer Ankerpunkt entsteht nur,
-// wenn im Umkreis von 4 m noch keiner existiert. So sind beliebig viele Notizen möglich.
+// wenn im Umkreis von 4 m noch keiner existiert. Der älteste Ankerpunkt ist der
+// „Heimat-Anker“: Ursprung der Hauskarte, alle anderen werden relativ dazu eingemessen.
 import * as THREE from './vendor/three.module.min.js';
 import {
   api, json, remoteLog, setLogSink, newId, COLORS, SpeechRecorder, transcribe,
-  pickVideoMime, uploadVideo, fmtDuration,
+  pickVideoMime, uploadVideo, fmtDuration, openCamera,
 } from './common.js';
 
 const NOTE_SIZE = 0.16;
@@ -14,26 +15,35 @@ const VIDEO_W = 0.36;
 const ANCHOR_RADIUS = 4.0;
 const MAX_ANCHORS = 8;
 const MAX_VIDEO_SECONDS = 180;
-const DELETE_CONFIRM_MS = 2500;
+const MAX_DICTATION_SECONDS = 30;
+const CONFIRM_MS = 2500;
+const TOOLBAR_LINGER_MS = 2000;
+const MAP_PX_PER_M = 28;
+const IDENTITY = new THREE.Matrix4().toArray();
 
 // ------------------------------------------------------------------ Zustand
 const st = {
   session: null, refSpace: null, opts: {},
   db: { notes: [], anchors: [] },
-  anchors: new Map(), // id → { rec, xr, matrix, tracked, failed }
-  items: new Map(), // noteId → { note, group, card, frame, video, hidden }
-  hitSources: new Map(), lastHit: new Map(), reticles: new Map(), buttons: new Map(),
+  anchors: new Map(), // id → { rec, xr, matrix, tracked, failed, creating }
+  items: new Map(), // noteId → item
+  hitSources: new Map(), lastHit: new Map(), reticles: new Map(), padState: new Map(),
   planeObjs: new Map(), meshObjs: new Map(), vizOn: true,
-  hover: new Map(), // XRInputSource → item
-  grab: null, deleteArm: null,
+  hover: new Map(), // XRInputSource → { item?, button? }
+  active: null, activeUntil: 0, // Notiz mit sichtbarer Aktionsleiste
+  confirm: null,
+  grab: null, // { src, item, offset, viaIcon }
   distance: 0.7, colorIdx: 0,
-  pendingText: '', pendingVideo: null,
-  dictation: null, recording: null, uploads: 0,
+  pendingText: '', pendingVideo: null, pendingNew: false,
+  dictation: null, recording: null, recStarting: false, recStopRequested: false, uploads: 0,
+  map: { track: [], walls: [], mode: 'follow', buffer: [], wallsBuffer: [], lastPos: null, lastFlush: 0, sentPlanes: new Map(), lastDraw: 0, lastLink: 0 },
   hud: { msg: 'bereit', dirty: true, last: 0 },
 };
 
-let renderer; let scene; let camera; let hudMesh; let hudCanvas; let hudTex; let ghost; let recPreview;
+let renderer; let scene; let camera;
+let hud; let ghost; let recPreview; let mapPanel;
 const speech = new SpeechRecorder();
+const raycaster = new THREE.Raycaster();
 
 // ------------------------------------------------------------------ Start
 export function primeAudio() { speech.prime(); }
@@ -41,21 +51,77 @@ export function primeAudio() { speech.prime(); }
 export async function startXR(opts) {
   st.opts = opts;
   if (!renderer) initThree();
+  const refType = opts.floor ? 'local-floor' : 'local';
+  renderer.xr.setReferenceSpaceType(refType);
   const optionalFeatures = ['anchors', 'hand-tracking'];
   if (opts.useScan) optionalFeatures.push('hit-test', 'plane-detection', 'mesh-detection');
-  const session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['local-floor'], optionalFeatures });
+  const session = await navigator.xr.requestSession('immersive-ar', {
+    requiredFeatures: opts.floor ? ['local-floor'] : [],
+    optionalFeatures,
+  });
   st.session = session;
   await renderer.xr.setSession(session);
   st.refSpace = renderer.xr.getReferenceSpace();
-  setLogSink((level, msg) => { st.hud.msg = msg.slice(0, 110); st.hud.dirty = true; });
+  setLogSink((level, msg) => { st.hud.msg = msg.slice(0, 120); st.hud.dirty = true; });
 
   const feats = session.enabledFeatures ? [...session.enabledFeatures] : [];
-  remoteLog('info', `AR gestartet (Scan ${opts.useScan ? 'an' : 'aus'}), Features: ${feats.join(', ') || '?'}`);
+  remoteLog('info', `AR gestartet (Raum: ${refType}, Scan ${opts.useScan ? 'an' : 'aus'}), Features: ${feats.join(', ') || '?'}`);
   for (const [ev, fn] of [['end', onEnd], ['select', onSelect], ['squeezestart', onSqueezeStart],
     ['squeezeend', onSqueezeEnd], ['inputsourceschange', setupHitTest]]) session.addEventListener(ev, fn);
   setupHitTest();
   renderer.setAnimationLoop(render);
   await loadAndRestore();
+}
+
+// ------------------------------------------------------------------ three.js-Grundgerüst
+function canvasPlane(w, h, px, { transparent = true, depthTest = true } = {}) {
+  const canvas = document.createElement('canvas');
+  canvas.width = px; canvas.height = Math.round(px * (h / w));
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, transparent, depthTest }));
+  return { mesh, canvas, tex, ctx: canvas.getContext('2d') };
+}
+
+// Knopf-Texturen werden pro (Symbol, Zustand, Hover) einmal gezeichnet und geteilt – spart GPU-Speicher
+const buttonTextures = new Map();
+const buttonGeo = new Map();
+function buttonTexture(symbol, state, hover) {
+  const key = `${symbol}|${state}|${hover}`;
+  let tex = buttonTextures.get(key);
+  if (tex) return tex;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 128;
+  const g = canvas.getContext('2d');
+  g.fillStyle = state === 'confirm' ? '#e03131' : state === 'on' ? '#2f6fde' : hover ? '#ffffff' : 'rgba(25,28,34,0.88)';
+  g.beginPath(); g.arc(64, 64, 60, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = hover ? '#4dabf7' : 'rgba(255,255,255,0.8)'; g.lineWidth = hover ? 9 : 5; g.stroke();
+  g.fillStyle = hover && state === 'normal' ? '#111' : '#fff';
+  g.font = '64px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(state === 'confirm' ? '?' : symbol, 64, 68);
+  tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.userData.shared = true;
+  buttonTextures.set(key, tex);
+  return tex;
+}
+
+// Runder 3D-Knopf mit Symbol; action wird beim Trigger auf den Knopf ausgeführt
+function makeButton(symbol, action, { size = 0.036, item = null } = {}) {
+  if (!buttonGeo.has(size)) { const geo = new THREE.PlaneGeometry(size, size); geo.userData.shared = true; buttonGeo.set(size, geo); }
+  const mesh = new THREE.Mesh(buttonGeo.get(size), new THREE.MeshBasicMaterial({ transparent: true, depthTest: false, side: THREE.DoubleSide }));
+  const btn = { mesh, symbol, action, item, state: 'normal', hover: false };
+  mesh.renderOrder = 12;
+  mesh.userData.button = btn;
+  drawButton(btn);
+  return btn;
+}
+
+function drawButton(btn, { hover = btn.hover } = {}) {
+  btn.mesh.material.map = buttonTexture(btn.symbol, btn.state, hover);
+  btn.mesh.material.needsUpdate = true;
+  btn.hover = hover;
 }
 
 function initThree() {
@@ -64,19 +130,24 @@ function initThree() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setClearColor(0x000000, 0);
   renderer.xr.enabled = true;
-  renderer.xr.setReferenceSpaceType('local-floor');
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
 
-  hudCanvas = document.createElement('canvas');
-  hudCanvas.width = 512; hudCanvas.height = 400;
-  hudTex = new THREE.CanvasTexture(hudCanvas);
-  hudTex.colorSpace = THREE.SRGBColorSpace;
-  hudMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.156),
-    new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false }));
-  hudMesh.renderOrder = 10;
-  hudMesh.position.set(0, 0.08, -0.08);
-  hudMesh.rotation.x = -0.7;
+  // Menü + Status am linken Controller (mit dem rechten Strahl bedienen)
+  hud = new THREE.Group();
+  hud.position.set(0, 0.075, -0.07);
+  hud.rotation.x = -0.75;
+  hud.panel = canvasPlane(0.2, 0.11, 512, { depthTest: false });
+  hud.panel.mesh.renderOrder = 10;
+  hud.add(hud.panel.mesh);
+  hud.menu = [
+    makeButton('＋', 'newNote'),
+    makeButton('🎙', 'dictateMenu'),
+    makeButton('●', 'video'),
+    makeButton('🗺', 'map'),
+    makeButton('▦', 'scanViz'),
+  ];
+  hud.menu.forEach((b, i) => { b.mesh.position.set(-0.08 + i * 0.04, -0.078, 0.001); hud.add(b.mesh); });
 
   let hudAttached = false;
   [0, 1].forEach((i) => {
@@ -85,10 +156,10 @@ function initThree() {
       new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45 }));
     ray.scale.z = 0.5;
     c.add(ray);
-    c.userData.ray = ray;
     c.addEventListener('connected', (e) => {
       c.userData.handedness = e.data.handedness;
-      if (!hudAttached && (e.data.handedness === 'left' || i === 1)) { c.add(hudMesh); hudAttached = true; }
+      c.userData.isRight = e.data.handedness === 'right';
+      if (!hudAttached && (e.data.handedness === 'left' || i === 1)) { c.add(hud); hudAttached = true; }
       if (e.data.handedness === 'left' && recPreview) c.add(recPreview);
     });
     scene.add(c);
@@ -96,49 +167,66 @@ function initThree() {
 
   ghost = new THREE.Group();
   ghost.visible = false;
+  ghost.matrixAutoUpdate = false;
   scene.add(ghost);
 
   recPreview = new THREE.Mesh(new THREE.PlaneGeometry(0.12, 0.09), new THREE.MeshBasicMaterial({ color: 0x222222 }));
   recPreview.position.set(0, 0.2, -0.06);
   recPreview.rotation.x = -0.5;
   recPreview.visible = false;
+
+  mapPanel = canvasPlane(0.24, 0.24, 512, { depthTest: false });
+  mapPanel.mesh.renderOrder = 11;
+  mapPanel.mesh.visible = false;
+  scene.add(mapPanel.mesh);
 }
 
 // ------------------------------------------------------------------ Laden & Anker wiederherstellen
 async function loadAndRestore() {
-  try { st.db = await api('state'); } catch (e) { remoteLog('error', e); }
+  try {
+    st.db = await api('state');
+    const map = await api('map');
+    st.map.track = map.track || [];
+    st.map.walls = map.walls || [];
+  } catch (e) { remoteLog('error', e); }
   const { session } = st;
   const handles = new Set(st.db.anchors.map((a) => a.handle));
 
-  // verwaiste persistente Anker (z. B. aus v0.1 oder gelöschten Notizen) freigeben → 8er-Limit
-  const known = Array.isArray(session.persistentAnchors) ? session.persistentAnchors : [];
+  // verwaiste persistente Anker freigeben → 8er-Limit
+  const known = Array.isArray(session.persistentAnchors) ? [...session.persistentAnchors] : [];
   for (const uuid of known) {
     if (!handles.has(uuid)) {
       try { await session.deletePersistentAnchor(uuid); remoteLog('info', `Verwaisten Anker entfernt (${uuid.slice(0, 8)})`); } catch { /* egal */ }
     }
   }
 
-  let ok = 0; let failed = 0;
-  for (const rec of st.db.anchors) {
+  let ok = 0; let failed = 0; let gone = 0;
+  for (const rec of [...st.db.anchors]) {
     const entry = { rec, xr: null, matrix: null, tracked: false, failed: false };
     st.anchors.set(rec.id, entry);
     if (!session.restorePersistentAnchor) { entry.failed = true; failed += 1; continue; }
+    if (Array.isArray(session.persistentAnchors) && !known.includes(rec.handle)) {
+      await dropAnchor(rec.id, 'nicht mehr im Browser gespeichert'); gone += 1; continue;
+    }
     try {
       entry.xr = await withTimeout(session.restorePersistentAnchor(rec.handle), 10000);
       ok += 1;
     } catch (e) {
+      if (/no persistent anchor/i.test(e.message)) { await dropAnchor(rec.id, e.message); gone += 1; continue; }
       entry.failed = true; failed += 1;
       remoteLog('warn', `Ankerpunkt ${rec.id} nicht gefunden: ${e.message}`);
     }
   }
   for (const note of st.db.notes) {
-    // Platzierung mit unbekanntem Ankerpunkt → wieder in die Warteschlange
-    if (note.placement && note.placement.anchor && !st.anchors.has(note.placement.anchor)) note.placement = null;
+    if (note.placement?.anchor && !st.anchors.has(note.placement.anchor)) {
+      note.placement = null; // Ankerpunkt weg → zurück in die Warteschlange
+      saveNote(note, ['placement']);
+    }
     if (note.placement) addItem(note);
   }
+  await ensureHome();
   await pruneAnchors();
-  const unplaced = queue().length;
-  remoteLog('info', `Geladen: ${st.db.notes.length} Notizen, Ankerpunkte ${ok} ok / ${failed} fehlgeschlagen, ${unplaced} zum Platzieren`);
+  remoteLog('info', `Geladen: ${st.db.notes.length} Einträge · Ankerpunkte ${ok} ok, ${failed} nicht gefunden, ${gone} verloren · ${queue().length} zum Platzieren`);
   st.hud.dirty = true;
 }
 
@@ -146,10 +234,47 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('Zeitüberschreitung')), ms))]);
 }
 
+// Ankerpunkt endgültig entfernen; seine Notizen landen wieder in der Warteschlange
+async function dropAnchor(id, why) {
+  st.anchors.delete(id);
+  st.db.anchors = st.db.anchors.filter((a) => a.id !== id);
+  for (const n of st.db.notes) if (n.placement?.anchor === id) n.placement = null;
+  try { await api(`anchors/${id}`, { method: 'DELETE' }); } catch { /* egal */ }
+  remoteLog('warn', `Ankerpunkt ${id} verloren (${why}) – Notizen wieder in der Warteschlange`);
+}
+
+// Heimat-Anker sicherstellen; fehlt er, wird ein anderer eingemessener Ankerpunkt zur neuen Heimat
+async function ensureHome() {
+  const home = st.db.anchors.find((a) => a.isHome);
+  if (home && st.anchors.has(home.id)) return;
+  const candidate = st.db.anchors.find((a) => Array.isArray(a.home));
+  if (!candidate) {
+    const first = st.db.anchors[0];
+    if (first) { first.isHome = true; first.home = IDENTITY; await patchAnchor(first, ['isHome', 'home']); }
+    return;
+  }
+  const inv = new THREE.Matrix4().fromArray(candidate.home).invert();
+  for (const a of st.db.anchors) {
+    if (Array.isArray(a.home)) a.home = new THREE.Matrix4().copy(inv).multiply(new THREE.Matrix4().fromArray(a.home)).toArray();
+    a.isHome = a.id === candidate.id;
+    await patchAnchor(a, ['home', 'isHome']);
+  }
+  try { await api('map/rebase', json('POST', { matrix: inv.toArray() })); } catch (e) { remoteLog('warn', e); }
+  const map = await api('map').catch(() => null);
+  if (map) { st.map.track = map.track; st.map.walls = map.walls; }
+  remoteLog('info', 'Heimat-Ankerpunkt neu gesetzt, Karte umgerechnet');
+}
+
+async function patchAnchor(rec, keys) {
+  const body = {};
+  for (const k of keys) body[k] = rec[k];
+  try { await api(`anchors/${rec.id}`, json('PATCH', body)); } catch (e) { remoteLog('warn', `Ankerpunkt speichern: ${e.message}`); }
+}
+
 async function pruneAnchors() {
   const used = new Set(st.db.notes.map((n) => n.placement?.anchor).filter(Boolean));
   for (const [id, entry] of st.anchors) {
-    if (used.has(id) || entry.creating) continue;
+    if (used.has(id) || entry.creating || entry.rec?.isHome || entry.isHome) continue; // Heimat bleibt für die Karte
     try { if (entry.rec?.handle) await st.session?.deletePersistentAnchor?.(entry.rec.handle); } catch { /* egal */ }
     try { entry.xr?.delete(); } catch { /* egal */ }
     st.anchors.delete(id);
@@ -181,8 +306,7 @@ function drawCard(canvas, note, { ghostText } = {}) {
     g.fillRect(0, 0, W, H);
     g.fillStyle = '#fff';
     g.font = 'bold 30px sans-serif';
-    const lines = wrapText(g, `▶ ${ghostText ?? note.text ?? 'Video-Anleitung'}`, W - 32).slice(0, 2);
-    lines.forEach((l, i) => g.fillText(l, 16, 40 + i * 34));
+    wrapText(g, `🎬 ${ghostText ?? note.text ?? 'Video-Anleitung'}`, W - 32).slice(0, 2).forEach((l, i) => g.fillText(l, 16, 40 + i * 34));
     return;
   }
   g.fillStyle = note.color || COLORS[0];
@@ -191,11 +315,11 @@ function drawCard(canvas, note, { ghostText } = {}) {
   g.fillRect(0, 0, W, 34);
   g.fillStyle = note.done ? 'rgba(0,0,0,0.4)' : '#222';
   g.font = 'bold 30px sans-serif';
-  const lines = wrapText(g, ghostText ?? (note.text || '(leer – A halten zum Diktieren)'), W - 36).slice(0, 7);
+  const lines = wrapText(g, ghostText ?? (note.text || '(leer – 🎙 zum Diktieren)'), W - 36).slice(0, 7);
   lines.forEach((l, i) => {
     const y = 78 + i * 36;
     g.fillText(l, 18, y);
-    if (note.done) { g.fillRect(18, y - 10, g.measureText(l).width, 3); }
+    if (note.done) g.fillRect(18, y - 10, g.measureText(l).width, 3);
   });
   g.font = '18px sans-serif';
   g.fillStyle = 'rgba(0,0,0,0.55)';
@@ -207,18 +331,10 @@ function drawCard(canvas, note, { ghostText } = {}) {
   }
 }
 
-function makeCanvasMesh(w, h, px) {
-  const canvas = document.createElement('canvas');
-  canvas.width = px; canvas.height = Math.round(px * (h / w));
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, transparent: true }));
-  return { mesh, canvas, tex };
-}
-
 function buildItemGroup(note, { asGhost = false, ghostText, blobUrl } = {}) {
   const group = new THREE.Group();
-  const item = { note, group, card: null, video: null, frame: null };
+  const item = { note, group, card: null, video: null, frame: null, toolbar: null, buttons: [] };
+  let bottom;
   if (note.type === 'video') {
     const video = document.createElement('video');
     video.src = blobUrl || `media/${note.media?.file}`;
@@ -229,6 +345,8 @@ function buildItemGroup(note, { asGhost = false, ghostText, blobUrl } = {}) {
     video.crossOrigin = 'anonymous';
     if (asGhost) video.play().catch(() => {});
     video.addEventListener('loadeddata', () => { if (!asGhost && video.paused) video.currentTime = Math.min(0.2, video.duration || 0); });
+    video.addEventListener('play', () => { if (item.playBtn) { item.playBtn.symbol = '⏸'; drawButton(item.playBtn); } });
+    video.addEventListener('pause', () => { if (item.playBtn) { item.playBtn.symbol = '▶'; drawButton(item.playBtn); } });
     const vtex = new THREE.VideoTexture(video);
     vtex.colorSpace = THREE.SRGBColorSpace;
     const h = VIDEO_W * 0.75;
@@ -237,24 +355,46 @@ function buildItemGroup(note, { asGhost = false, ghostText, blobUrl } = {}) {
     video.addEventListener('loadedmetadata', () => {
       if (video.videoWidth && video.videoHeight) screen.scale.y = (video.videoWidth / video.videoHeight) / (4 / 3);
     });
-    const cap = makeCanvasMesh(VIDEO_W, 0.06, 512);
+    const cap = canvasPlane(VIDEO_W, 0.06, 512);
     cap.mesh.position.y = -h / 2 - 0.035;
     group.add(cap.mesh);
     drawCard(cap.canvas, note, { ghostText });
     cap.tex.needsUpdate = true;
     item.video = video; item.card = cap; item.hitMeshes = [screen, cap.mesh];
     item.frame = makeFrame(VIDEO_W + 0.02, h + 0.1, -0.03);
+    bottom = -h / 2 - 0.07;
   } else {
-    const card = makeCanvasMesh(NOTE_SIZE, NOTE_SIZE, 320);
+    const card = canvasPlane(NOTE_SIZE, NOTE_SIZE, 320);
     drawCard(card.canvas, note, { ghostText });
     card.tex.needsUpdate = true;
     group.add(card.mesh);
     item.card = card; item.hitMeshes = [card.mesh];
     item.frame = makeFrame(NOTE_SIZE + 0.014, NOTE_SIZE + 0.014, 0);
+    bottom = -NOTE_SIZE / 2;
   }
   item.frame.visible = false;
   group.add(item.frame);
-  if (asGhost) group.traverse((o) => { if (o.material) { o.material.transparent = true; o.material.opacity = 0.55; } });
+  if (asGhost) {
+    group.traverse((o) => { if (o.material) { o.material.transparent = true; o.material.opacity = 0.55; } });
+    return item;
+  }
+  // Aktionsleiste unter der Notiz
+  const defs = note.type === 'video'
+    ? [['▶', 'play'], ['🎙', 'dictate'], ['✥', 'move'], ['🗑', 'delete']]
+    : [['✓', 'done'], ['🎙', 'dictate'], ['✥', 'move'], ['🎨', 'color'], ['🗑', 'delete']];
+  item.toolbar = new THREE.Group();
+  item.toolbar.position.set(0, bottom - 0.028, 0.004);
+  defs.forEach(([sym, action], i) => {
+    const btn = makeButton(sym, action, { item });
+    btn.mesh.position.x = (i - (defs.length - 1) / 2) * 0.042;
+    item.toolbar.add(btn.mesh);
+    item.buttons.push(btn);
+    if (action === 'play') item.playBtn = btn;
+    if (action === 'done') item.doneBtn = btn;
+  });
+  if (item.doneBtn && note.done) { item.doneBtn.state = 'on'; drawButton(item.doneBtn); }
+  item.toolbar.visible = false;
+  group.add(item.toolbar);
   return item;
 }
 
@@ -267,6 +407,7 @@ function makeFrame(w, h, yOff) {
 function redraw(item) {
   drawCard(item.card.canvas, item.note);
   item.card.tex.needsUpdate = true;
+  if (item.doneBtn) { item.doneBtn.state = item.note.done ? 'on' : 'normal'; drawButton(item.doneBtn); }
 }
 
 function addItem(note) {
@@ -285,18 +426,23 @@ function removeItem(id) {
   scene.remove(item.group);
   disposeTree(item.group);
   if (item.video) { item.video.pause(); item.video.removeAttribute('src'); item.video.load(); }
+  if (st.active === item) st.active = null;
   st.items.delete(id);
 }
 
 function disposeTree(obj) {
-  obj.traverse((o) => { o.geometry?.dispose(); if (o.material) { o.material.map?.dispose(); o.material.dispose(); } });
+  obj.traverse((o) => {
+    if (o.geometry && !o.geometry.userData.shared) o.geometry.dispose();
+    if (o.material) { if (o.material.map && !o.material.map.userData.shared) o.material.map.dispose(); o.material.dispose(); }
+  });
 }
 
-// ------------------------------------------------------------------ Platzierung
+// ------------------------------------------------------------------ Warteschlange & Platzierung
 function queue() {
   const items = [];
   if (st.pendingVideo) items.push({ kind: 'video', label: `Video (${fmtDuration(st.pendingVideo.seconds)})${st.pendingText ? `: ${st.pendingText}` : ''}` });
   else if (st.pendingText) items.push({ kind: 'text', label: st.pendingText });
+  else if (st.pendingNew) items.push({ kind: 'new', label: 'Neue Notiz (danach sprechen)' });
   const unplaced = st.db.notes.filter((n) => !n.placement && !n.done && !(n.type === 'video' && !n.media?.file))
     .sort((a, b) => (a.created ?? 0) - (b.created ?? 0));
   for (const n of unplaced) items.push({ kind: 'note', note: n, label: n.text || (n.type === 'video' ? 'Video' : 'Notiz') });
@@ -305,8 +451,7 @@ function queue() {
 
 function sourcePose(frame, src) {
   const rp = frame.getPose(src.targetRaySpace, st.refSpace);
-  if (!rp) return null;
-  return new THREE.Matrix4().fromArray(rp.transform.matrix);
+  return rp ? new THREE.Matrix4().fromArray(rp.transform.matrix) : null;
 }
 
 function camForwardFlat() {
@@ -316,7 +461,7 @@ function camForwardFlat() {
   return v.lengthSq() > 1e-6 ? v.normalize() : new THREE.Vector3(0, 0, -1);
 }
 
-// Zielpose für eine neue Notiz: auf erkannter Fläche (Scan) oder frei im Raum, aufrecht zum Nutzer gedreht
+// Zielpose: auf erkannter Fläche (Scan) oder frei im Raum, aufrecht zum Nutzer gedreht
 function targetMatrix(frame, src) {
   const tmp = new THREE.Object3D();
   const hit = st.lastHit.get(src);
@@ -340,7 +485,7 @@ function targetMatrix(frame, src) {
   return tmp.matrix.clone();
 }
 
-// Ordnet eine Weltpose einem Ankerpunkt zu (legt bei Bedarf synchron einen neuen an – nur im XR-Event möglich)
+// Weltpose einem Ankerpunkt zuordnen (legt bei Bedarf synchron einen neuen an – nur im XR-Event möglich)
 function attachToAnchor(frame, world) {
   const pos = new THREE.Vector3().setFromMatrixPosition(world);
   let best = null; let bestD = Infinity;
@@ -353,63 +498,66 @@ function attachToAnchor(frame, world) {
   if (best && (bestD <= ANCHOR_RADIUS || !canCreate)) {
     return { anchor: best, rel: new THREE.Matrix4().copy(st.anchors.get(best).matrix).invert().multiply(world).toArray() };
   }
-  if (!canCreate) {
-    return { anchor: null, rel: world.toArray() }; // ohne Anker: nur für diese Sitzung stabil
-  }
-  // neuer Ankerpunkt: gleiche Position, nur um die Hochachse gedreht
+  if (!canCreate) return { anchor: null, rel: world.toArray() };
   const yaw = new THREE.Euler().setFromRotationMatrix(world, 'YXZ').y;
   const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw, 0, 'YXZ'));
   const am = new THREE.Matrix4().compose(pos, q, new THREE.Vector3(1, 1, 1));
   const id = newId();
-  const entry = { rec: null, xr: null, matrix: am.clone(), tracked: false, failed: false, creating: true };
+  const isHome = !st.db.anchors.some((a) => a.isHome) && ![...st.anchors.values()].some((a) => a.isHome);
+  const entry = { rec: null, xr: null, matrix: am.clone(), tracked: false, failed: false, creating: true, isHome };
   st.anchors.set(id, entry);
-  const promise = frame.createAnchor(new XRRigidTransform({ x: pos.x, y: pos.y, z: pos.z }, { x: q.x, y: q.y, z: q.z, w: q.w }), st.refSpace);
+  let promise;
+  try {
+    promise = frame.createAnchor(new XRRigidTransform({ x: pos.x, y: pos.y, z: pos.z }, { x: q.x, y: q.y, z: q.z, w: q.w }), st.refSpace);
+  } catch (e) {
+    st.anchors.delete(id);
+    remoteLog('warn', `createAnchor: ${e.message}`);
+    return { anchor: null, rel: world.toArray() };
+  }
   promise.then(async (xrAnchor) => {
     entry.xr = xrAnchor;
     let handle = null;
     try { handle = await xrAnchor.requestPersistentHandle?.(); } catch (e) { remoteLog('warn', `Persistenter Handle fehlgeschlagen: ${e.message}`); }
     if (handle) {
-      entry.rec = await api('anchors', json('POST', { id, handle }));
+      // Einmessen relativ zur Heimat, falls diese gerade sichtbar ist
+      const homeW = homeWorld();
+      const home = isHome ? IDENTITY : (homeW ? homeW.clone().invert().multiply(am).toArray() : null);
+      entry.rec = await api('anchors', json('POST', { id, handle, isHome, home }));
       st.db.anchors.push(entry.rec);
-      remoteLog('info', `Neuer Ankerpunkt (${st.anchors.size}/${MAX_ANCHORS})`);
+      remoteLog('info', `Neuer Ankerpunkt${isHome ? ' (Heimat der Karte)' : ''} (${st.anchors.size}/${MAX_ANCHORS})`);
     }
     entry.creating = false;
   }).catch((e) => { entry.creating = false; remoteLog('warn', `createAnchor: ${e.message}`); });
   return { anchor: id, rel: new THREE.Matrix4().copy(am).invert().multiply(world).toArray() };
 }
 
-function onSelect(e) {
-  const { frame, inputSource: src } = e;
-  if (st.recording || st.recStarting) { remoteLog('info', 'Aufnahme läuft – erst mit X beenden, dann platzieren'); return undefined; }
-  const hovered = st.hover.get(src);
-  if (hovered && !st.grab) {
-    if (hovered.note.type === 'video') toggleVideo(hovered);
-    else toggleDone(hovered);
+function placeNext(frame, src) {
+  const next = queue()[0];
+  if (!next) {
+    remoteLog('info', 'Nichts zu platzieren – Menü links: ＋ Notiz, 🎙 Diktat oder ● Video');
     return;
   }
   const world = targetMatrix(frame, src);
   if (!world) return;
-  const next = queue()[0];
   const placement = attachToAnchor(frame, world);
-
-  if (next?.kind === 'video') return placeVideo(placement, world);
+  if (next.kind === 'video') { placeVideo(placement, world); return; }
   let note;
-  if (next?.kind === 'note') {
-    note = next.note;
-  } else {
+  if (next.kind === 'note') note = next.note;
+  else {
     note = {
-      id: newId(), type: 'note', text: next?.kind === 'text' ? st.pendingText : '', color: COLORS[st.colorIdx],
+      id: newId(), type: 'note', text: next.kind === 'text' ? st.pendingText : '', color: COLORS[st.colorIdx],
       done: false, location: '', media: null, created: Math.floor(Date.now() / 1000),
     };
     st.db.notes.push(note);
     st.pendingText = '';
+    st.pendingNew = false;
   }
   note.placement = placement;
   const item = addItem(note);
   item.group.matrix.copy(world); item.group.visible = true;
   saveNote(note, ['type', 'text', 'color', 'done', 'location', 'media', 'placement']);
-  remoteLog('info', `Notiz platziert${note.text ? `: „${note.text.slice(0, 40)}“` : ' (leer)'}`);
-  return undefined;
+  remoteLog('info', `Notiz platziert${note.text ? `: „${note.text.slice(0, 40)}“` : ''}`);
+  if (next.kind === 'new') dictationStart(src, item, 'toggle'); // gleich losreden
 }
 
 async function placeVideo(placement, world) {
@@ -431,7 +579,7 @@ async function placeVideo(placement, world) {
   remoteLog('info', `Video wird hochgeladen (${Math.round(pv.blob.size / 1024)} KB)…`);
   try {
     const media = await uploadVideo(pv.blob, pv.ext);
-    note.media = { ...media, duration: pv.seconds };
+    note.media = { ...media, duration: pv.seconds, camera: pv.camera };
     await saveNote(note, ['type', 'text', 'color', 'done', 'location', 'media', 'placement']);
     remoteLog('info', 'Video-Anleitung gespeichert');
   } catch (err) {
@@ -448,11 +596,84 @@ async function saveNote(note, fields) {
   st.hud.dirty = true;
 }
 
+// ------------------------------------------------------------------ Trigger / Select
+function onSelect(e) {
+  const { frame, inputSource: src } = e;
+  const hov = st.hover.get(src);
+  if (hov?.button) { runButton(hov.button, frame, src); return; }
+  if (st.grab?.viaIcon && st.grab.src === src) { finishGrab(frame); return; }
+  if (st.dictation?.mode === 'toggle') { dictationStop(); return; }
+  if (st.recording || st.recStarting) { remoteLog('info', 'Aufnahme läuft – mit ● im Menü oder X beenden'); return; }
+  if (hov?.item) {
+    if (hov.item.note.type === 'video') toggleVideo(hov.item);
+    else activate(hov.item); // Aktionsleiste zeigen
+    return;
+  }
+  placeNext(frame, src);
+}
+
+function needsConfirm(key) {
+  const now = performance.now();
+  if (st.confirm?.key === key && now - st.confirm.t < CONFIRM_MS) { st.confirm = null; return false; }
+  st.confirm = { key, t: now };
+  return true;
+}
+
+function runButton(btn, frame, src) {
+  const { item } = btn;
+  switch (btn.action) {
+    case 'done': toggleDone(item); break;
+    case 'play': toggleVideo(item); break;
+    case 'dictate':
+      if (st.dictation) dictationStop(); else dictationStart(src, item, 'toggle');
+      break;
+    case 'move': startGrab(frame, src, item, true); break;
+    case 'color': recolor(item); break;
+    case 'delete':
+      if (needsConfirm(`del:${item.note.id}`)) {
+        btn.state = 'confirm'; drawButton(btn);
+        remoteLog('info', 'Nochmal 🗑 = löschen');
+        setTimeout(() => { if (btn.state === 'confirm') { btn.state = 'normal'; drawButton(btn); } }, CONFIRM_MS);
+      } else deleteItem(item);
+      break;
+    case 'newNote':
+      st.pendingNew = !st.pendingNew; st.ghostKey = null;
+      if (st.pendingNew) remoteLog('info', 'Neue Notiz: mit Trigger platzieren, danach sprechen');
+      break;
+    case 'dictateMenu':
+      if (st.dictation) dictationStop(); else dictationStart(src, null, 'toggle');
+      break;
+    case 'video': toggleRecording(); break;
+    case 'map': cycleMap(); break;
+    case 'scanViz':
+      st.vizOn = !st.vizOn;
+      remoteLog('info', st.opts.useScan ? `Raum-Scan-Anzeige ${st.vizOn ? 'an' : 'aus'}` : 'Raum-Scan ist auf der Startseite ausgeschaltet');
+      break;
+    default: break;
+  }
+  st.hud.dirty = true;
+}
+
+function activate(item) {
+  if (!item.toolbar) return;
+  if (st.active && st.active !== item && st.active.toolbar) st.active.toolbar.visible = false;
+  st.active = item;
+  st.activeUntil = performance.now() + TOOLBAR_LINGER_MS;
+  item.toolbar.visible = true;
+}
+
 function toggleDone(item) {
   item.note.done = !item.note.done;
   redraw(item);
   saveNote(item.note, ['done']);
   remoteLog('info', item.note.done ? 'Abgehakt ✓' : 'Wieder offen');
+}
+
+function recolor(item) {
+  const idx = (COLORS.indexOf(item.note.color) + 1) % COLORS.length;
+  item.note.color = COLORS[idx];
+  redraw(item);
+  saveNote(item.note, ['color']);
 }
 
 function toggleVideo(item) {
@@ -461,30 +682,37 @@ function toggleVideo(item) {
   if (v.paused) { v.muted = false; v.play().catch((err) => remoteLog('warn', `Wiedergabe: ${err.message}`)); } else v.pause();
 }
 
-// ------------------------------------------------------------------ Verschieben (Grip)
-function onSqueezeStart(e) {
-  const { frame, inputSource: src } = e;
-  const item = st.hover.get(src);
-  if (!item || st.grab) return;
+// ------------------------------------------------------------------ Verschieben (Grip oder ✥)
+function startGrab(frame, src, item, viaIcon) {
+  if (st.grab) return;
   const ctrl = sourcePose(frame, src);
   if (!ctrl) return;
-  st.grab = { src, item, offset: ctrl.clone().invert().multiply(item.group.matrix) };
+  st.grab = { src, item, viaIcon, offset: ctrl.clone().invert().multiply(item.group.matrix) };
   item.frame.visible = true;
   item.frame.material.color.set(0x4dabf7);
+  if (item.toolbar) item.toolbar.visible = false;
+  if (viaIcon) remoteLog('info', 'Verschieben – Trigger zum Absetzen (Stick: näher/weiter)');
 }
 
-function onSqueezeEnd(e) {
-  if (!st.grab || st.grab.src !== e.inputSource) return;
+function finishGrab(frame) {
   const { item } = st.grab;
   st.grab = null;
   item.frame.material.color.set(0xffffff);
-  item.note.placement = attachToAnchor(e.frame, item.group.matrix.clone());
+  item.note.placement = attachToAnchor(frame, item.group.matrix.clone());
   saveNote(item.note, ['placement']);
   remoteLog('info', 'Notiz verschoben');
   pruneAnchors();
 }
 
-// ------------------------------------------------------------------ Löschen, Farbe, Diktat, Video
+function onSqueezeStart(e) {
+  const hov = st.hover.get(e.inputSource);
+  if (hov?.item && !hov.button) startGrab(e.frame, e.inputSource, hov.item, false);
+}
+
+function onSqueezeEnd(e) {
+  if (st.grab && !st.grab.viaIcon && st.grab.src === e.inputSource) finishGrab(e.frame);
+}
+
 async function deleteItem(item) {
   const { note } = item;
   removeItem(note.id);
@@ -494,40 +722,16 @@ async function deleteItem(item) {
   pruneAnchors();
 }
 
-function onDeleteButton(src) {
-  const item = st.hover.get(src);
-  if (!item) { remoteLog('info', 'Zum Löschen auf eine Notiz zeigen'); return; }
-  const now = performance.now();
-  if (st.deleteArm?.item === item && now - st.deleteArm.t < DELETE_CONFIRM_MS) {
-    st.deleteArm = null;
-    deleteItem(item);
-  } else {
-    st.deleteArm = { item, t: now };
-    remoteLog('info', 'Nochmal B drücken = löschen');
-  }
-}
-
-function onColorButton(src) {
-  const item = st.hover.get(src);
-  if (item && item.note.type === 'note') {
-    const idx = (COLORS.indexOf(item.note.color) + 1) % COLORS.length;
-    item.note.color = COLORS[idx];
-    redraw(item);
-    saveNote(item.note, ['color']);
-  } else {
-    st.colorIdx = (st.colorIdx + 1) % COLORS.length;
-  }
-  st.hud.dirty = true;
-}
-
-async function dictationStart(src) {
+// ------------------------------------------------------------------ Diktat
+async function dictationStart(src, item, mode) {
   if (st.dictation) return;
-  const target = st.hover.get(src);
-  st.dictation = { target: target?.note.type === 'note' ? target : null, starting: true };
+  st.dictation = { target: item ?? null, mode, starting: true };
   try {
     await speech.start();
     st.dictation.starting = false;
-    remoteLog('info', st.dictation.target ? '🎙 Diktat für diese Notiz… (A loslassen)' : '🎙 Diktat für neue Notiz… (A loslassen)');
+    st.dictation.timer = setTimeout(() => dictationStop(), MAX_DICTATION_SECONDS * 1000);
+    const how = mode === 'toggle' ? 'Trigger zum Beenden' : 'A loslassen';
+    remoteLog('info', item ? `🎙 Sprich jetzt… (${how})` : `🎙 Text für nächste Notiz… (${how})`);
   } catch (err) {
     st.dictation = null;
     remoteLog('error', `Mikrofon: ${err.message}`);
@@ -538,9 +742,10 @@ async function dictationStop() {
   const d = st.dictation;
   if (!d) return;
   if (d.starting) { setTimeout(dictationStop, 150); return; }
+  clearTimeout(d.timer);
   st.dictation = null;
   const { wav, seconds } = speech.stop();
-  if (seconds < 0.4) { remoteLog('info', 'Zu kurz – A gedrückt halten und sprechen'); return; }
+  if (seconds < 0.4) { remoteLog('info', 'Zu kurz – länger sprechen'); return; }
   st.hud.msg = '⏳ Erkenne Sprache…'; st.hud.dirty = true;
   try {
     const text = await transcribe(wav);
@@ -549,7 +754,7 @@ async function dictationStop() {
       d.target.note.text = text;
       redraw(d.target);
       saveNote(d.target.note, ['text']);
-      remoteLog('info', `Text geändert: „${text.slice(0, 60)}“`);
+      remoteLog('info', `Text: „${text.slice(0, 60)}“`);
     } else {
       st.pendingText = text;
       remoteLog('info', `Erkannt: „${text.slice(0, 60)}“ – Trigger zum Platzieren`);
@@ -560,16 +765,15 @@ async function dictationStop() {
   st.hud.dirty = true;
 }
 
+// ------------------------------------------------------------------ Video-Aufnahme
 async function toggleRecording() {
-  if (st.recStarting) { st.recStopRequested = true; return; } // zweiter Druck, während die Kamera noch startet
+  if (st.recStarting) { st.recStopRequested = true; return; }
   if (st.recording) { if (st.recording.recorder.state === 'recording') st.recording.recorder.stop(); return; }
   st.recStarting = true;
   st.recStopRequested = false;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 960 }, frameRate: { ideal: 30 } },
-      audio: { echoCancellation: true, noiseSuppression: true },
-    });
+    const { stream, label, how, cams } = await openCamera(true);
+    remoteLog('info', `Kameras: ${cams.map((c) => c.label || '(ohne Name)').join(' | ')} → nutze „${label}“ (${how})`);
     const { mime, ext } = pickVideoMime();
     const recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 2_500_000 } : undefined);
     const chunks = [];
@@ -580,22 +784,21 @@ async function toggleRecording() {
       const seconds = (performance.now() - started) / 1000;
       const blob = new Blob(chunks, { type: recorder.mimeType || `video/${ext}` });
       if (st.pendingVideo) URL.revokeObjectURL(st.pendingVideo.url);
-      st.pendingVideo = { blob, ext, seconds, url: URL.createObjectURL(blob) };
+      st.pendingVideo = { blob, ext, seconds, url: URL.createObjectURL(blob), camera: label };
       clearTimeout(st.recording?.timer);
       st.recording = null;
       setPreview(null);
       st.ghostKey = null;
-      remoteLog('info', `Video aufgenommen (${fmtDuration(seconds)}, ${Math.round(blob.size / 1024)} KB) – Trigger zum Platzieren, A für Titel`);
+      remoteLog('info', `Video aufgenommen (${fmtDuration(seconds)}, ${Math.round(blob.size / 1024)} KB, ${Math.round((blob.size * 8) / 1000 / Math.max(1, seconds))} kbit/s) – Trigger zum Platzieren`);
     };
     recorder.start(1000);
     st.recording = { recorder, started, timer: setTimeout(() => recorder.state === 'recording' && recorder.stop(), MAX_VIDEO_SECONDS * 1000) };
     setPreview(stream);
-    const track = stream.getVideoTracks()[0];
-    const s = track?.getSettings?.() ?? {};
-    remoteLog('info', `● Aufnahme läuft (${s.width ?? '?'}×${s.height ?? '?'}, ${mime || 'Standardformat'}) – X zum Beenden`);
+    const s = stream.getVideoTracks()[0]?.getSettings?.() ?? {};
+    remoteLog('info', `● Aufnahme (${s.width ?? '?'}×${s.height ?? '?'}, ${mime || 'Standard'}) – ● oder X zum Beenden`);
     if (st.recStopRequested) setTimeout(() => recorder.state === 'recording' && recorder.stop(), 1000);
   } catch (err) {
-    remoteLog('error', `Kamera: ${err.message} – Kamera-Freigabe auf der Startseite erteilen`);
+    remoteLog('error', `Kamera: ${err.message} – Kamera auf der Startseite wählen und freigeben`);
   } finally {
     st.recStarting = false;
   }
@@ -617,7 +820,7 @@ function setPreview(stream) {
   recPreview.material.needsUpdate = true;
 }
 
-// ------------------------------------------------------------------ Eingaben pro Frame
+// ------------------------------------------------------------------ Eingaben pro Frame (physische Tasten als Abkürzung)
 function pollInput(frame, dt) {
   for (const src of st.session.inputSources) {
     const gp = src.gamepad;
@@ -626,34 +829,48 @@ function pollInput(frame, dt) {
     const b4 = Boolean(gp.buttons[4]?.pressed);
     const b5 = Boolean(gp.buttons[5]?.pressed);
     const b3 = Boolean(gp.buttons[3]?.pressed);
-    const prev = st.buttons.get(src) ?? { b4: false, b5: false, b3: false };
+    const prev = st.padState.get(src) ?? { b4: false, b5: false, b3: false };
     if (right) {
-      if (b4 && !prev.b4) dictationStart(src); // A gedrückt
-      if (!b4 && prev.b4) dictationStop(); // A losgelassen
-      if (b5 && !prev.b5) onDeleteButton(src); // B
+      if (b4 && !prev.b4 && !st.dictation) dictationStart(src, st.hover.get(src)?.item ?? null, 'hold');
+      if (!b4 && prev.b4 && st.dictation?.mode === 'hold') dictationStop();
+      if (b5 && !prev.b5) {
+        const h = st.hover.get(src)?.item;
+        if (h) { if (needsConfirm(`del:${h.note.id}`)) remoteLog('info', 'Nochmal B = löschen'); else deleteItem(h); }
+      }
       const y = gp.axes[3] ?? 0;
       if (Math.abs(y) > 0.2) {
-        if (st.grab && st.grab.src === src) {
-          const m = new THREE.Matrix4().makeTranslation(0, 0, y * dt * 1.2);
-          st.grab.offset.premultiply(m);
-        } else {
-          st.distance = THREE.MathUtils.clamp(st.distance - y * dt * 1.2, 0.25, 4); // Stick vor = weiter weg
-        }
+        if (st.grab && st.grab.src === src) st.grab.offset.premultiply(new THREE.Matrix4().makeTranslation(0, 0, y * dt * 1.2));
+        else { st.distance = THREE.MathUtils.clamp(st.distance - y * dt * 1.2, 0.25, 4); st.hud.dirty = true; }
       }
     } else {
       if (b4 && !prev.b4) toggleRecording(); // X
-      if (b5 && !prev.b5) onColorButton(src); // Y
-      if (b3 && !prev.b3) { st.vizOn = !st.vizOn; remoteLog('info', `Raum-Scan-Anzeige ${st.vizOn ? 'an' : 'aus'}`); }
+      if (b5 && !prev.b5) { // Y
+        const h = [...st.hover.values()].find((x) => x.item)?.item;
+        if (h?.note.type === 'note') recolor(h); else st.colorIdx = (st.colorIdx + 1) % COLORS.length;
+        st.hud.dirty = true;
+      }
+      if (b3 && !prev.b3) cycleMap();
     }
-    st.buttons.set(src, { b4, b5, b3 });
+    st.padState.set(src, { b4, b5, b3 });
   }
 }
 
-const raycaster = new THREE.Raycaster();
+function isOnController(obj, src) {
+  let p = obj.parent;
+  while (p && !p.userData?.handedness) p = p.parent;
+  return p?.userData?.handedness === src.handedness;
+}
+
 function updateHover(frame) {
-  const hitMeshes = [];
-  for (const item of st.items.values()) if (item.group.visible) for (const m of item.hitMeshes) { m.userData.item = item; hitMeshes.push(m); }
-  const hovered = new Set();
+  const targets = [];
+  for (const item of st.items.values()) {
+    if (!item.group.visible || st.grab?.item === item) continue;
+    for (const m of item.hitMeshes) { m.userData.item = item; targets.push(m); }
+    if (item.toolbar?.visible) for (const b of item.buttons) targets.push(b.mesh);
+  }
+  if (hud.parent) for (const b of hud.menu) targets.push(b.mesh);
+
+  const hoveredButtons = new Set();
   for (const src of st.session.inputSources) {
     if (src.targetRayMode !== 'tracked-pointer') continue;
     const m = sourcePose(frame, src);
@@ -662,43 +879,63 @@ function updateHover(frame) {
       raycaster.ray.origin.setFromMatrixPosition(m);
       raycaster.ray.direction.set(0, 0, -1).transformDirection(m);
       raycaster.far = 6;
-      found = raycaster.intersectObjects(hitMeshes, false)[0]?.object.userData.item ?? null;
+      const own = (o) => o.userData.button && !o.userData.button.item && isOnController(hud, src);
+      const hit = raycaster.intersectObjects(targets, false).find((h) => !own(h.object)); // eigenes Menü nicht anpeilen
+      if (hit) {
+        const btn = hit.object.userData.button;
+        found = btn ? { button: btn, item: btn.item } : { item: hit.object.userData.item };
+      }
     }
-    if (found) { st.hover.set(src, found); hovered.add(found); } else st.hover.delete(src);
+    if (found) st.hover.set(src, found); else st.hover.delete(src);
+    if (found?.button) hoveredButtons.add(found.button);
+    if (found?.item) activate(found.item);
   }
-  const armed = st.deleteArm && performance.now() - st.deleteArm.t < DELETE_CONFIRM_MS ? st.deleteArm.item : null;
+  for (const b of [...hud.menu, ...(st.active?.buttons ?? [])]) {
+    const h = hoveredButtons.has(b);
+    if (h !== b.hover) drawButton(b, { hover: h });
+  }
+  const now = performance.now();
+  if (st.active && now > st.activeUntil && !st.grab) { st.active.toolbar.visible = false; st.active = null; }
   for (const item of st.items.values()) {
     if (st.grab?.item === item) continue;
-    item.frame.visible = hovered.has(item) || armed === item;
-    item.frame.material.color.set(armed === item ? 0xff4d4d : 0xffffff);
+    item.frame.visible = st.active === item;
   }
+  setMenuState('dictateMenu', Boolean(st.dictation));
+  setMenuState('video', Boolean(st.recording));
+  setMenuState('newNote', st.pendingNew);
+  setMenuState('map', st.map.mode !== 'off');
 }
 
-// Vorschau („Geist“) der nächsten Platzierung am rechten Controller
+function setMenuState(action, on) {
+  const b = hud.menu.find((x) => x.action === action);
+  const state = on ? 'on' : 'normal';
+  if (b && b.state !== state) { b.state = state; drawButton(b); }
+}
+
+// Vorschau („Geist“) der nächsten Platzierung – nur wenn etwas in der Warteschlange ist
 function updateGhost(frame) {
-  const src = [...st.session.inputSources].find((s) => s.handedness === 'right' && s.targetRayMode === 'tracked-pointer')
-    ?? [...st.session.inputSources].find((s) => s.targetRayMode === 'tracked-pointer');
-  const show = src && !st.hover.get(src) && !st.grab && !st.recording;
-  if (!show) { ghost.visible = false; return; }
+  const sources = [...st.session.inputSources].filter((s) => s.targetRayMode === 'tracked-pointer');
+  const src = sources.find((s) => s.handedness === 'right') ?? sources[0];
   const next = queue()[0];
-  const key = next ? `${next.kind}:${next.label}:${st.colorIdx}` : `new:${st.colorIdx}`;
+  const show = src && next && !st.hover.get(src) && !st.grab && !st.recording;
+  if (!show) { ghost.visible = false; return; }
+  const key = `${next.kind}:${next.label}:${st.colorIdx}`;
   if (st.ghostKey !== key) {
     st.ghostKey = key;
     ghost.children.slice().forEach((c) => { ghost.remove(c); disposeTree(c); });
     if (st.ghostItem?.video) st.ghostItem.video.pause();
     let note;
     let opts = { asGhost: true };
-    if (next?.kind === 'video') {
+    if (next.kind === 'video') {
       note = { type: 'video', text: st.pendingText || 'Video-Anleitung' };
       opts = { ...opts, blobUrl: st.pendingVideo.url };
-    } else if (next?.kind === 'note') note = next.note;
-    else note = { type: 'note', color: COLORS[st.colorIdx], text: next?.kind === 'text' ? st.pendingText : '' };
-    st.ghostItem = buildItemGroup(note, { ...opts, ghostText: next ? undefined : 'Neue Notiz' });
+    } else if (next.kind === 'note') note = next.note;
+    else note = { type: 'note', color: COLORS[st.colorIdx], text: next.kind === 'text' ? st.pendingText : '' };
+    st.ghostItem = buildItemGroup(note, { ...opts, ghostText: next.kind === 'new' ? 'Neue Notiz' : undefined });
     ghost.add(st.ghostItem.group);
   }
   const m = targetMatrix(frame, src);
   if (!m) { ghost.visible = false; return; }
-  ghost.matrixAutoUpdate = false;
   ghost.matrix.copy(m);
   ghost.visible = true;
 }
@@ -732,7 +969,7 @@ function updateScan(frame) {
   syncScene(frame.detectedPlanes, st.planeObjs, frame, (plane) => new THREE.LineLoop(
     new THREE.BufferGeometry().setFromPoints(plane.polygon.map((p) => new THREE.Vector3(p.x, p.y, p.z))),
     new THREE.LineBasicMaterial({ color: plane.orientation === 'vertical' ? 0x4dabf7 : 0x69db7c }),
-  ), (p) => p.planeSpace);
+  ), (p) => p.planeSpace, collectWall);
   syncScene(frame.detectedMeshes, st.meshObjs, frame, (mesh) => {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(mesh.vertices), 3));
@@ -741,7 +978,7 @@ function updateScan(frame) {
   }, (m) => m.meshSpace);
 }
 
-function syncScene(set, map, frame, build, spaceOf) {
+function syncScene(set, map, frame, build, spaceOf, onPose) {
   if (!set) return;
   for (const [k, obj] of map) if (!set.has(k)) { scene.remove(obj); disposeTree(obj); map.delete(k); }
   for (const k of set) {
@@ -755,43 +992,199 @@ function syncScene(set, map, frame, build, spaceOf) {
       map.set(k, obj);
     }
     const pose = frame.getPose(spaceOf(k), st.refSpace);
-    if (pose) obj.matrix.fromArray(pose.transform.matrix);
+    if (pose) { obj.matrix.fromArray(pose.transform.matrix); onPose?.(k, obj.matrix); }
     obj.visible = st.vizOn && Boolean(pose);
   }
 }
 
+// ------------------------------------------------------------------ Hauskarte
+// Weltpose des Heimat-Ankers – direkt oder über einen anderen eingemessenen, sichtbaren Ankerpunkt
+function homeWorld() {
+  let fallback = null;
+  for (const a of st.anchors.values()) {
+    const rec = a.rec;
+    if (!a.matrix || !a.tracked || !Array.isArray(rec?.home)) continue;
+    const hw = a.matrix.clone().multiply(new THREE.Matrix4().fromArray(rec.home).invert());
+    if (rec.isHome) return hw;
+    fallback ??= hw;
+  }
+  return fallback;
+}
+
+function linkAnchors() {
+  const hw = homeWorld();
+  if (!hw) return;
+  const inv = hw.clone().invert();
+  for (const a of st.anchors.values()) {
+    if (!a.rec || Array.isArray(a.rec.home) || !a.tracked || !a.matrix) continue;
+    a.rec.home = inv.clone().multiply(a.matrix).toArray();
+    patchAnchor(a.rec, ['home']);
+    remoteLog('info', `Ankerpunkt ${a.rec.id} in die Karte eingemessen`);
+  }
+}
+
+function recordTrack(now) {
+  const hw = homeWorld();
+  if (!hw) return;
+  const head = new THREE.Vector3().setFromMatrixPosition(renderer.xr.getCamera().matrixWorld);
+  if (st.map.lastPos && st.map.lastPos.distanceTo(head) < 0.3) return;
+  st.map.lastPos = head.clone();
+  const p = head.applyMatrix4(hw.clone().invert());
+  const pt = [Math.round(p.x * 10) / 10, Math.round(p.z * 10) / 10];
+  st.map.track.push(pt);
+  st.map.buffer.push(pt);
+  if (st.map.buffer.length >= 25 || now - st.map.lastFlush > 5000) flushMap(now);
+}
+
+function collectWall(plane, matrix) {
+  if (plane.orientation !== 'vertical' || st.map.sentPlanes.get(plane) === plane.lastChangedTime) return;
+  const hw = homeWorld();
+  if (!hw) return;
+  st.map.sentPlanes.set(plane, plane.lastChangedTime);
+  const toHome = hw.clone().invert().multiply(matrix);
+  const pts = plane.polygon.map((p) => new THREE.Vector3(p.x, p.y, p.z).applyMatrix4(toHome));
+  let a = null; let b = null; let best = 0;
+  for (let i = 0; i < pts.length; i += 1) {
+    for (let j = i + 1; j < pts.length; j += 1) {
+      const d = Math.hypot(pts[i].x - pts[j].x, pts[i].z - pts[j].z);
+      if (d > best) { best = d; a = pts[i]; b = pts[j]; }
+    }
+  }
+  if (!a || best < 0.3) return;
+  const w = [a.x, a.z, b.x, b.z].map((v) => Math.round(v * 20) / 20);
+  st.map.walls.push(w);
+  st.map.wallsBuffer.push(w);
+}
+
+function flushMap(now, { beacon = false } = {}) {
+  st.map.lastFlush = now;
+  if (!st.map.buffer.length && !st.map.wallsBuffer.length) return;
+  const body = { track: st.map.buffer.splice(0), walls: st.map.wallsBuffer.splice(0) };
+  if (beacon && navigator.sendBeacon) { navigator.sendBeacon('api/map', JSON.stringify(body)); return; }
+  api('map', json('POST', body)).catch((e) => remoteLog('warn', `Karte speichern: ${e.message}`));
+}
+// Tab wird geschlossen/verlassen, ohne dass die AR-Sitzung sauber endet → Wegpunkte trotzdem sichern
+window.addEventListener('pagehide', () => flushMap(performance.now(), { beacon: true }));
+
+function rightController() {
+  const c0 = renderer.xr.getController(0);
+  return c0.userData.isRight ? c0 : renderer.xr.getController(1);
+}
+
+function cycleMap() {
+  const order = ['follow', 'hand', 'off'];
+  st.map.mode = order[(order.indexOf(st.map.mode) + 1) % order.length];
+  remoteLog('info', { follow: 'Karte oben rechts', hand: 'Karte am rechten Controller', off: 'Karte aus' }[st.map.mode]);
+  if (st.map.mode === 'hand') {
+    rightController().add(mapPanel.mesh);
+    mapPanel.mesh.position.set(0, 0.07, -0.1);
+    mapPanel.mesh.rotation.set(-0.9, 0, 0);
+    mapPanel.mesh.scale.setScalar(0.7);
+  } else {
+    scene.add(mapPanel.mesh);
+    mapPanel.mesh.scale.setScalar(1);
+  }
+  mapPanel.mesh.visible = st.map.mode !== 'off';
+}
+
+const followTarget = new THREE.Vector3();
+function updateMapPanel(now) {
+  if (st.map.mode === 'off') { mapPanel.mesh.visible = false; return; }
+  mapPanel.mesh.visible = true;
+  if (st.map.mode === 'follow') {
+    // „Lazy follow“: rechts oben im Blickfeld, folgt dem Kopf weich
+    const m = renderer.xr.getCamera().matrixWorld;
+    const right = new THREE.Vector3(1, 0, 0).transformDirection(m);
+    const up = new THREE.Vector3(0, 1, 0).transformDirection(m);
+    const fwd = new THREE.Vector3(0, 0, -1).transformDirection(m);
+    const pos = new THREE.Vector3().setFromMatrixPosition(m);
+    followTarget.copy(pos).addScaledVector(fwd, 0.8).addScaledVector(right, 0.33).addScaledVector(up, 0.2);
+    if (mapPanel.mesh.position.lengthSq() === 0) mapPanel.mesh.position.copy(followTarget);
+    mapPanel.mesh.position.lerp(followTarget, 0.08);
+    mapPanel.mesh.lookAt(pos);
+  }
+  if (now - st.map.lastDraw > 250) { drawMap(); st.map.lastDraw = now; }
+}
+
+function drawMap() {
+  const g = mapPanel.ctx;
+  const S = 512; const C = S / 2;
+  g.clearRect(0, 0, S, S);
+  g.fillStyle = 'rgba(12,15,20,0.82)';
+  g.beginPath(); g.arc(C, C, C - 4, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = 'rgba(255,255,255,0.5)'; g.lineWidth = 4; g.stroke();
+  const hw = homeWorld();
+  const cam = renderer.xr.getCamera();
+  g.textAlign = 'center';
+  if (!hw) {
+    g.fillStyle = '#fff'; g.font = '28px sans-serif';
+    if (st.db.anchors.length) g.fillText('Suche Ankerpunkt…', C, C);
+    else { g.fillText('Karte startet mit', C, C - 14); g.fillText('der ersten Notiz', C, C + 22); }
+    mapPanel.tex.needsUpdate = true;
+    return;
+  }
+  const inv = hw.clone().invert();
+  const head = new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld).applyMatrix4(inv);
+  const dir = new THREE.Vector3(0, 0, -1).transformDirection(cam.matrixWorld).transformDirection(inv);
+  const yaw = Math.atan2(dir.x, -dir.z); // Blickrichtung zeigt auf der Karte nach oben
+  const cos = Math.cos(-yaw); const sin = Math.sin(-yaw);
+  const toPx = (x, z) => {
+    const dx = x - head.x; const dz = z - head.z;
+    return [C + (dx * cos - dz * sin) * MAP_PX_PER_M, C + (dx * sin + dz * cos) * MAP_PX_PER_M];
+  };
+  g.save();
+  g.beginPath(); g.arc(C, C, C - 8, 0, Math.PI * 2); g.clip();
+  g.fillStyle = 'rgba(140,160,190,0.35)';
+  for (const [x, z] of st.map.track) {
+    const [px, py] = toPx(x, z);
+    if (px > -10 && px < S + 10 && py > -10 && py < S + 10) g.fillRect(px - 4, py - 4, 8, 8);
+  }
+  g.strokeStyle = '#fff'; g.lineWidth = 4;
+  for (const [x1, z1, x2, z2] of st.map.walls) {
+    const [a1, b1] = toPx(x1, z1); const [a2, b2] = toPx(x2, z2);
+    g.beginPath(); g.moveTo(a1, b1); g.lineTo(a2, b2); g.stroke();
+  }
+  for (const n of st.db.notes) {
+    const pl = n.placement;
+    if (!pl?.anchor) continue;
+    const rec = st.db.anchors.find((a) => a.id === pl.anchor);
+    if (!Array.isArray(rec?.home)) continue;
+    const p = new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(rec.home).multiply(new THREE.Matrix4().fromArray(pl.rel)));
+    const [px, py] = toPx(p.x, p.z);
+    g.fillStyle = n.type === 'video' ? '#ff6b6b' : (n.done ? 'rgba(180,180,180,0.7)' : n.color || COLORS[0]);
+    if (n.type === 'video') { g.beginPath(); g.moveTo(px - 9, py - 11); g.lineTo(px + 12, py); g.lineTo(px - 9, py + 11); g.fill(); } else g.fillRect(px - 9, py - 9, 18, 18);
+  }
+  g.restore();
+  g.fillStyle = '#4dabf7';
+  g.beginPath(); g.moveTo(C, C - 18); g.lineTo(C + 12, C + 12); g.lineTo(C, C + 5); g.lineTo(C - 12, C + 12); g.closePath(); g.fill();
+  g.fillStyle = 'rgba(255,255,255,0.7)'; g.font = '20px sans-serif';
+  g.fillText(`Ø ${Math.round((2 * C) / MAP_PX_PER_M)} m`, C, S - 22);
+  mapPanel.tex.needsUpdate = true;
+}
+
 // ------------------------------------------------------------------ HUD
 function drawHud() {
-  const g = hudCanvas.getContext('2d');
-  g.clearRect(0, 0, 512, 400);
-  g.fillStyle = 'rgba(15,18,24,0.85)';
-  g.beginPath(); g.roundRect(0, 0, 512, 400, 24); g.fill();
+  const g = hud.panel.ctx;
+  const W = hud.panel.canvas.width; const H = hud.panel.canvas.height;
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = 'rgba(15,18,24,0.86)';
+  g.beginPath(); g.roundRect(0, 0, W, H, 22); g.fill();
   g.fillStyle = COLORS[st.colorIdx];
-  g.fillRect(456, 20, 34, 34);
+  g.fillRect(W - 50, 16, 30, 30);
   g.fillStyle = '#fff';
-  g.font = 'bold 28px sans-serif';
-  g.fillText('Home Notes XR', 22, 48);
-  g.font = '21px sans-serif';
-  const placed = [...st.items.values()].filter((i) => i.group.visible).length;
-  const hidden = st.db.notes.filter((n) => n.placement && !st.items.get(n.id)?.group.visible).length;
+  g.font = 'bold 24px sans-serif';
+  g.fillText('Home Notes XR', 18, 38);
+  g.font = '19px sans-serif';
   const next = queue()[0];
   const lines = [];
-  if (st.recording) lines.push(`● REC ${fmtDuration((performance.now() - st.recording.started) / 1000)}  (X = Stopp)`);
-  if (st.dictation) lines.push('🎙 Höre zu… (A loslassen)');
+  if (st.recording) lines.push(`● REC ${fmtDuration((performance.now() - st.recording.started) / 1000)}`);
+  if (st.dictation) lines.push('🎙 Höre zu…');
   if (st.uploads) lines.push(`⏫ Lade ${st.uploads} Video(s) hoch…`);
-  lines.push(`Nächstes: ${next ? next.label.slice(0, 60) : 'neue leere Notiz'}`);
-  lines.push(`Sichtbar ${placed} · nicht gefunden ${hidden} · Ankerpunkte ${st.anchors.size}/${MAX_ANCHORS}`);
-  lines.push(`Abstand ${st.distance.toFixed(2)} m${st.opts.useScan ? ' · Scan an' : ''}`);
+  lines.push(next ? `Nächstes: ${next.label.slice(0, 50)}` : 'Warteschlange leer');
   lines.push(`› ${st.hud.msg}`);
-  let y = 86;
-  for (const l of lines) for (const part of wrapText(g, l, 470)) { g.fillText(part, 22, y); y += 28; }
-  g.font = '17px sans-serif';
-  g.fillStyle = 'rgba(255,255,255,0.65)';
-  const help = ['Trigger: setzen · auf Notiz: abhaken / Video ▶', 'Grip halten: verschieben · Stick: Abstand',
-    'A halten: diktieren · B 2×: löschen', 'X: Video-Aufnahme · Y: Farbe · L-Stick: Scan'];
-  y = Math.max(y + 6, 316);
-  for (const h of help) { g.fillText(h, 22, y); y += 22; }
-  hudTex.needsUpdate = true;
+  let y = 70;
+  for (const l of lines) for (const part of wrapText(g, l, W - 36).slice(0, 3)) { if (y < H - 8) { g.fillText(part, 18, y); y += 24; } }
+  hud.panel.tex.needsUpdate = true;
   st.hud.dirty = false;
 }
 
@@ -826,7 +1219,10 @@ function render(t, frame) {
     updateHover(frame);
     updateGhost(frame);
     pollInput(frame, dt);
-    if (st.recording) st.hud.dirty = true;
+    if (t - st.map.lastLink > 1000) { linkAnchors(); st.map.lastLink = t; }
+    recordTrack(t);
+    updateMapPanel(t);
+    if (st.recording || st.dictation) st.hud.dirty = true;
   }
   if (st.hud.dirty && t - st.hud.last > 250) { drawHud(); st.hud.last = t; }
   renderer.render(scene, camera);
@@ -835,12 +1231,15 @@ function render(t, frame) {
 function onEnd() {
   renderer.setAnimationLoop(null);
   if (st.recording) st.recording.recorder.stop();
+  if (st.dictation) { clearTimeout(st.dictation.timer); speech.stop(); st.dictation = null; }
   speech.release();
+  flushMap(performance.now());
   for (const id of [...st.items.keys()]) removeItem(id);
   ghost.children.slice().forEach((c) => { ghost.remove(c); disposeTree(c); });
   for (const obj of [...st.planeObjs.values(), ...st.meshObjs.values(), ...st.reticles.values()]) { scene.remove(obj); disposeTree(obj); }
-  for (const m of [st.anchors, st.hitSources, st.lastHit, st.reticles, st.buttons, st.planeObjs, st.meshObjs, st.hover]) m.clear();
-  Object.assign(st, { session: null, grab: null, deleteArm: null, dictation: null, ghostKey: null, ghostItem: null });
+  for (const m of [st.anchors, st.hitSources, st.lastHit, st.reticles, st.padState, st.planeObjs, st.meshObjs, st.hover, st.map.sentPlanes]) m.clear();
+  Object.assign(st, { session: null, grab: null, confirm: null, active: null, ghostKey: null, ghostItem: null, pendingNew: false });
+  st.map.lastPos = null;
   setLogSink(null);
   remoteLog('info', 'AR beendet');
   st.opts.onEnd?.();

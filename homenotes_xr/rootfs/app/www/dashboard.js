@@ -1,6 +1,7 @@
 // Home Notes XR – Übersicht (Desktop in der HA-Seitenleiste und 2D-Seite auf der Quest)
 import {
   api, json, remoteLog, escapeHtml, COLORS, SpeechRecorder, transcribe, fmtDuration,
+  listCameras, cameraScore, savedCameraId, saveCameraId,
 } from './common.js';
 
 const $ = (id) => document.getElementById(id);
@@ -19,6 +20,11 @@ async function init() {
   await setupXR();
   await refresh();
   setInterval(() => { if (!editing()) refresh(); }, 15000);
+  $('map-reset').onclick = async () => {
+    if (!confirm('Gelaufene Wege und Wände der Karte löschen? Notizen bleiben erhalten.')) return;
+    await api('map', { method: 'DELETE' });
+    renderMap();
+  };
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !editing()) refresh(); });
 }
 
@@ -47,15 +53,17 @@ async function setupXR() {
     $('xr-status').textContent = 'Bereit. Notizen und Videos erscheinen dort, wo du sie platziert hast.';
     $('start-ar').hidden = false;
     $('xr-options').hidden = false;
-    $('use-scan').checked = localStorage.getItem('homenotes.useScan') === '1';
-    $('use-scan').onchange = () => localStorage.setItem('homenotes.useScan', $('use-scan').checked ? '1' : '0');
+    for (const [id, key] of [['use-scan', 'homenotes.useScan'], ['use-floor', 'homenotes.useFloor']]) {
+      $(id).checked = localStorage.getItem(key) === '1';
+      $(id).onchange = () => localStorage.setItem(key, $(id).checked ? '1' : '0');
+    }
     $('grant').onclick = grantMedia;
     checkPermissions();
     $('start-ar').onclick = async () => {
       try {
         xrModule ??= await import('./xr.js');
         xrModule.primeAudio(); // in der Klick-Geste, sonst bleibt das Mikrofon stumm
-        await xrModule.startXR({ useScan: $('use-scan').checked, onEnd: () => refresh() });
+        await xrModule.startXR({ useScan: $('use-scan').checked, floor: $('use-floor').checked, onEnd: () => refresh() });
       } catch (err) {
         remoteLog('error', `AR-Start fehlgeschlagen: ${err.message}`);
         alert(`AR konnte nicht starten: ${err.message}`);
@@ -79,8 +87,9 @@ async function grantMedia() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
     const v = stream.getVideoTracks()[0]?.getSettings?.() ?? {};
     stream.getTracks().forEach((t) => t.stop());
-    $('grant-status').textContent = `✓ freigegeben (Kamera ${v.width ?? '?'}×${v.height ?? '?'})`;
+    $('grant-status').textContent = '✓ freigegeben';
     remoteLog('info', `Kamera/Mikrofon freigegeben ${v.width}x${v.height}`);
+    await setupCameraPicker();
   } catch (err) {
     $('grant-status').textContent = `✗ ${err.message}`;
     remoteLog('warn', `Freigabe: ${err.message}`);
@@ -90,8 +99,40 @@ async function grantMedia() {
 async function checkPermissions() {
   try {
     const [cam, mic] = await Promise.all(['camera', 'microphone'].map((n) => navigator.permissions.query({ name: n })));
-    if (cam.state === 'granted' && mic.state === 'granted') $('grant-status').textContent = '✓ bereits freigegeben';
+    if (cam.state === 'granted' && mic.state === 'granted') {
+      $('grant-status').textContent = '✓ bereits freigegeben';
+      await setupCameraPicker();
+    }
   } catch { /* Permissions-API nicht verfügbar */ }
+}
+
+// Kamera-Auswahl mit Live-Vorschau – die Quest bietet Passthrough- und virtuelle Kameras an
+let previewStream = null;
+async function setupCameraPicker() {
+  const cams = await listCameras();
+  if (!cams.length) return;
+  const sel = $('camera-select');
+  const saved = savedCameraId();
+  const best = [...cams].sort((a, b) => cameraScore(b.label) - cameraScore(a.label))[0];
+  sel.innerHTML = cams.map((c, i) => `<option value="${escapeHtml(c.deviceId)}">${escapeHtml(c.label || `Kamera ${i + 1}`)}${c === best ? ' (empfohlen)' : ''}</option>`).join('');
+  sel.value = cams.some((c) => c.deviceId === saved) ? saved : best.deviceId;
+  $('cam-box').hidden = false;
+  remoteLog('info', `Kameras: ${cams.map((c) => `${c.label || '?'}`).join(' | ')}`);
+  const show = async () => {
+    saveCameraId(sel.value);
+    previewStream?.getTracks().forEach((t) => t.stop());
+    try {
+      previewStream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: sel.value } } });
+      $('cam-preview').srcObject = previewStream;
+      await $('cam-preview').play().catch(() => {});
+      const s = previewStream.getVideoTracks()[0]?.getSettings?.() ?? {};
+      remoteLog('info', `Kamera-Vorschau: ${sel.selectedOptions[0]?.textContent} ${s.width}x${s.height}`);
+    } catch (err) { remoteLog('warn', `Kamera-Vorschau: ${err.message}`); }
+  };
+  sel.onchange = show;
+  await show();
+  // Vorschau stoppen, sobald AR startet (Kamera wird dort neu geöffnet)
+  $('start-ar').addEventListener('click', () => { previewStream?.getTracks().forEach((t) => t.stop()); previewStream = null; }, { once: true });
 }
 
 // ------------------------------------------------------------------ Neue Notiz
@@ -168,6 +209,62 @@ async function refresh() {
     notes = db.notes || [];
   } catch (e) { remoteLog('error', e); }
   render();
+  renderMap();
+}
+
+// ------------------------------------------------------------------ Hauskarte (Draufsicht)
+function notePos(n, anchors) {
+  const pl = n.placement;
+  const a = anchors.find((x) => x.id === pl?.anchor);
+  if (!Array.isArray(a?.home)) return null;
+  const H = a.home; const [tx, ty, tz] = [pl.rel[12], pl.rel[13], pl.rel[14]];
+  return [H[0] * tx + H[4] * ty + H[8] * tz + H[12], H[2] * tx + H[6] * ty + H[10] * tz + H[14]];
+}
+
+async function renderMap() {
+  let map;
+  try { map = await api('map'); } catch (e) { remoteLog('error', e); return; }
+  const pins = map.notes.map((n) => ({ n, p: notePos(n, map.anchors) })).filter((x) => x.p);
+  const anchors = map.anchors.filter((a) => Array.isArray(a.home)).map((a) => ({ a, p: [a.home[12], a.home[14]] }));
+  $('map-stats').textContent = `${map.track.length} Wegpunkte · ${map.walls.length} Wände · ${pins.length} Einträge auf der Karte`;
+  const xs = []; const zs = [];
+  for (const [x, z] of map.track) { xs.push(x); zs.push(z); }
+  for (const w of map.walls) { xs.push(w[0], w[2]); zs.push(w[1], w[3]); }
+  for (const { p } of [...pins, ...anchors]) { xs.push(p[0]); zs.push(p[1]); }
+  if (!xs.length) {
+    $('map').innerHTML = '<div class="empty">Noch keine Karte. Sie entsteht im Headset beim Herumgehen, sobald die erste Notiz platziert ist. Mit Raum-Scan kommen auch Wände dazu.</div>';
+    return;
+  }
+  const pad = 1;
+  const minX = Math.min(...xs) - pad; const maxX = Math.max(...xs) + pad;
+  const minZ = Math.min(...zs) - pad; const maxZ = Math.max(...zs) + pad;
+  const w = Math.max(maxX - minX, 4); const h = Math.max(maxZ - minZ, 3);
+  const f = (v) => v.toFixed(2);
+  const parts = [];
+  // 1-m-Raster
+  for (let x = Math.ceil(minX); x <= maxX; x += 1) parts.push(`<line x1="${x}" y1="${f(minZ)}" x2="${x}" y2="${f(minZ + h)}" class="g"/>`);
+  for (let z = Math.ceil(minZ); z <= maxZ; z += 1) parts.push(`<line x1="${f(minX)}" y1="${z}" x2="${f(minX + w)}" y2="${z}" class="g"/>`);
+  for (const [x, z] of map.track) parts.push(`<rect x="${f(x - 0.15)}" y="${f(z - 0.15)}" width="0.3" height="0.3" class="t"/>`);
+  for (const [x1, z1, x2, z2] of map.walls) parts.push(`<line x1="${x1}" y1="${z1}" x2="${x2}" y2="${z2}" class="w"/>`);
+  for (const { a, p } of anchors) {
+    parts.push(`<path d="M${f(p[0])} ${f(p[1] - 0.18)} l0.18 0.18 l-0.18 0.18 l-0.18 -0.18z" class="${a.isHome ? 'home' : 'a'}"><title>${a.isHome ? 'Heimat-Ankerpunkt' : 'Ankerpunkt'}</title></path>`);
+  }
+  for (const { n, p } of pins) {
+    const fill = n.type === 'video' ? '#e8590c' : (n.done ? '#adb5bd' : (n.color || COLORS[0]));
+    const shape = n.type === 'video'
+      ? `<path d="M${f(p[0] - 0.16)} ${f(p[1] - 0.2)} l0.36 0.2 l-0.36 0.2z" fill="${fill}" class="pin"/>`
+      : `<circle cx="${f(p[0])}" cy="${f(p[1])}" r="0.17" fill="${fill}" class="pin"/>`;
+    parts.push(`<g data-id="${escapeHtml(n.id)}" style="cursor:pointer">${shape}<title>${escapeHtml(n.text || n.type)}</title></g>`);
+  }
+  $('map').innerHTML = `<svg viewBox="${f(minX)} ${f(minZ)} ${f(w)} ${f(h)}" role="img" aria-label="Hauskarte">
+    <style>.g{stroke:rgba(127,127,127,.18);stroke-width:.02}.t{fill:rgba(77,171,247,.28)}.w{stroke:currentColor;stroke-width:.08;stroke-linecap:round}
+    .a{fill:#868e96}.home{fill:#2f6fde}.pin{stroke:#222;stroke-width:.03}</style>${parts.join('')}</svg>`;
+  $('map').querySelectorAll('g[data-id]').forEach((g) => {
+    g.onclick = () => {
+      const card = document.querySelector(`[data-note="${g.dataset.id}"]`);
+      if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.classList.add('flash'); setTimeout(() => card.classList.remove('flash'), 1600); }
+    };
+  });
 }
 
 function visible(n) {
@@ -193,6 +290,7 @@ function render() {
 function card(n) {
   const el = document.createElement('article');
   el.className = `note${n.done ? ' done' : ''}`;
+  el.dataset.note = n.id;
   const when = n.created ? new Date(n.created * 1000).toLocaleString('de-AT', { dateStyle: 'short', timeStyle: 'short' }) : '';
   const placed = n.placement ? '⚓ im Raum platziert' : '⏳ wartet auf Platzierung';
   const video = n.type === 'video'

@@ -13,20 +13,34 @@ Home-Assistant-Seitenleiste unter **Home Notes**.
 
 ## Steuerung im Headset
 
-| Eingabe | Wirkung |
-|---|---|
-| Trigger / Pinch | Nächste Notiz setzen · auf Notiz: abhaken · auf Video: Play/Pause |
-| Grip halten | Notiz greifen und verschieben (rechter Stick: näher/weiter) |
-| Rechter Stick | Abstand der Vorschau ohne Raum-Scan |
-| A halten | Diktieren – auf eine Notiz zeigen ersetzt deren Text, sonst Text für die nächste Notiz |
-| B zweimal | Notiz oder Video löschen |
-| X | Video-Anleitung aufnehmen / stoppen, danach mit Trigger platzieren |
-| Y | Farbe wechseln (auf Notiz: deren Farbe) |
-| Linken Stick drücken | Raum-Scan-Anzeige ein/aus |
+**Menü am linken Controller** (mit dem rechten Strahl zeigen, Trigger drücken):
+＋ Notiz · 🎙 Diktat · ● Video · 🗺 Karte (oben rechts → am rechten Controller → aus) · ▦ Scan-Anzeige
 
-**Ohne Raum-Scan (Standard):** Notizen schweben dort, wohin der Controller zeigt
-(Abstand mit dem Stick). Dafür muss die Wohnung nicht eingerichtet sein.
-**Mit Raum-Scan:** Notizen haften an erkannten Wänden und Möbeln.
+**Auf eine Notiz zeigen** – die Aktionsleiste erscheint:
+✓ abhaken · 🎙 Text sprechen (Trigger beendet) · ✥ verschieben (Trigger setzt ab) · 🎨 Farbe · 🗑 löschen (zweimal)
+
+**Auf ein Video zeigen:** ▶ abspielen · 🎙 Titel · ✥ verschieben · 🗑 löschen
+
+**Trigger ins Leere** platziert das Nächste aus der Warteschlange (Vorschau am Strahl,
+Abstand mit dem rechten Stick).
+
+Abkürzungen: A halten = diktieren · B 2× = löschen · Grip = greifen · X = Video · Y = Farbe ·
+linken Stick drücken = Karte.
+
+**Ohne Raum-Scan (Standard):** keine Raumeinrichtung, keine Begrenzung nötig.
+**Mit Raum-Scan** (unter „Erweitert“): Notizen haften an Wänden und Möbeln, Wände erscheinen auf der Karte.
+
+## Video-Anleitungen
+
+Auf der Startseite „Kamera & Mikrofon freigeben“ tippen und in der Liste die Kamera wählen,
+deren Vorschau dein Zimmer zeigt. Die „virtuelle Kamera“ der Quest zeigt in Mixed Reality nur Schwarz.
+
+## Hauskarte
+
+Der erste Ankerpunkt ist die Heimat der Karte. Während du im Headset herumgehst, werden
+deine Wege (10-cm-Raster) gespeichert, mit Raum-Scan auch Wände. Notizen erscheinen als
+Punkte, Videos als Dreiecke. In der Übersicht gibt es die Draufsicht; ein Klick auf einen
+Punkt springt zur Karte der Notiz.
 
 ## Warteschlange
 
