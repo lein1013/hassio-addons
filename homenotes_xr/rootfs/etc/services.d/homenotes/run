@@ -29,4 +29,5 @@ bashio::log.info "WebXR-URL: https://<HA-Adresse>:8443/  (Übersicht: HA-Seitenl
 exec python3 -u /app/server.py \
     --cert "${CERT}" --key "${KEY}" --cert-mode "${MODE}" \
     --stt-entity "$(bashio::config 'stt_entity')" \
-    --language "$(bashio::config 'language')"
+    --language "$(bashio::config 'language')" \
+    --title-agent "$(bashio::config 'title_agent')"

@@ -23,7 +23,7 @@ import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 WWW = os.environ.get("HOMENOTES_WWW", "/app/www")
 DATA_FILE = os.environ.get("HOMENOTES_DATA", "/data/homenotes.json")
 MEDIA_DIR = os.environ.get("HOMENOTES_MEDIA", "/media/homenotes")
@@ -32,11 +32,11 @@ HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 # Ingress port is not mapped to the host; only containers on the hassio network reach it
 INGRESS_NET = ("172.30.32.", "172.30.33.")
 MAX_UPLOAD = 400 * 1024 * 1024
-NOTE_FIELDS = {"type", "text", "color", "done", "location", "media", "placement"}
+NOTE_FIELDS = {"type", "text", "color", "done", "location", "media", "placement", "transcript"}
 MEDIA_NAME = re.compile(r"^[a-f0-9]{12}\.(mp4|webm)$")
 
 _lock = threading.Lock()
-CFG = {"cert_mode": "unbekannt", "stt_entity": "", "language": "de"}
+CFG = {"cert_mode": "unbekannt", "stt_entity": "", "language": "de", "title_agent": ""}
 _stt_cache = {"entity": None, "language": None, "checked": 0.0, "error": None}
 
 
@@ -53,11 +53,30 @@ def load_db():
     db.setdefault("notes", [])
     db.setdefault("anchors", [])
     db.setdefault("map", {"track": [], "walls": []})
+    db["map"].setdefault("grid", {})
     return db
 
 
 MAX_TRACK = 60000
 MAX_WALLS = 6000
+MAX_GRID = 250000
+
+
+def merge_grid(db, cells):
+    """Belegungsraster (10-cm-Zellen): je Zelle Zähler [belegt, frei]. Wird über Zeit immer genauer."""
+    grid = db["map"]["grid"]
+    for cell in cells or []:
+        if len(cell) < 4:
+            continue
+        key = f"{int(cell[0])},{int(cell[1])}"
+        if key not in grid and len(grid) >= MAX_GRID:
+            continue
+        occ, free = grid.get(key, (0, 0))
+        grid[key] = [min(occ + int(cell[2]), 10000), min(free + int(cell[3]), 10000)]
+
+
+def grid_list(db):
+    return [[*map(int, k.split(",")), v[0], v[1]] for k, v in db["map"]["grid"].items()]
 
 
 def merge_map(db, track, walls):
@@ -158,6 +177,48 @@ def transcribe(wav_bytes):
     return (result.get("text") or "").strip()
 
 
+def fallback_title(text):
+    first = re.split(r"(?<=[.!?])\s+", text.strip())[0] if text.strip() else ""
+    words = first.rstrip(".!?").split()
+    return " ".join(words[:7]) + ("…" if len(words) > 7 else "")
+
+
+def resolve_title_agent():
+    if CFG["title_agent"].lower() in ("aus", "off", "none", "null"):
+        return ""
+    if CFG["title_agent"]:
+        return CFG["title_agent"]
+    try:
+        states = ha_request("GET", "/states")
+        agents = [s["entity_id"] for s in states if s["entity_id"].startswith("conversation.")
+                  and s["entity_id"] != "conversation.home_assistant" and s.get("state") != "unavailable"]
+        return agents[0] if agents else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def make_title(transcript):
+    """Kurztitel für eine Video-Anleitung – per Sprachmodell (HA-Konversationsagent), sonst erster Satz."""
+    if not transcript.strip():
+        return ""
+    agent = resolve_title_agent()
+    if agent:
+        prompt = ("Du bekommst das Transkript einer kurzen Video-Anleitung aus einem Haushalt. "
+                  "Antworte NUR mit einem kurzen deutschen Titel (höchstens 6 Wörter), ohne Anführungszeichen, "
+                  "ohne Erklärung und ohne Geräte zu steuern.\n\nTranskript: " + transcript[:1500])
+        try:
+            res = ha_request("POST", "/conversation/process", timeout=25,
+                             data=json.dumps({"text": prompt, "language": CFG["language"], "agent_id": agent}).encode(),
+                             headers={"Content-Type": "application/json"})
+            speech = (((res or {}).get("response") or {}).get("speech") or {}).get("plain", {}).get("speech", "")
+            title = speech.strip().strip('"„“\'').splitlines()[0].strip() if speech.strip() else ""
+            if 2 <= len(title) <= 80:
+                return title
+        except Exception as err:  # noqa: BLE001
+            print(f"[title] Agent {agent} fehlgeschlagen: {err}", flush=True)
+    return fallback_title(transcript)
+
+
 # ------------------------------------------------------------------ HTTP
 class Handler(SimpleHTTPRequestHandler):
     server_version = f"HomeNotesXR/{VERSION}"
@@ -240,7 +301,8 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/map":
             with _lock:
                 db = load_db()
-            return self._json(200, {**db["map"], "anchors": db["anchors"], "notes": [
+            return self._json(200, {"track": db["map"]["track"], "walls": db["map"]["walls"], "grid": grid_list(db),
+                                    "anchors": db["anchors"], "notes": [
                 {k: n.get(k) for k in ("id", "type", "text", "color", "done", "placement")} for n in db["notes"]]})
         if route.startswith("/media/"):
             return self._serve_media(route.rsplit("/", 1)[-1])
@@ -326,8 +388,10 @@ class Handler(SimpleHTTPRequestHandler):
             with _lock:
                 db = load_db()
                 merge_map(db, data.get("track"), data.get("walls"))
+                merge_grid(db, data.get("cells"))
                 save_db(db)
-            return self._json(200, {"track": len(db["map"]["track"]), "walls": len(db["map"]["walls"])})
+            return self._json(200, {"track": len(db["map"]["track"]), "walls": len(db["map"]["walls"]),
+                                    "grid": len(db["map"]["grid"])})
         if route == "/api/map/rebase":
             # neuer Heimat-Ankerpunkt: alle Kartenpunkte mit der übergebenen Matrix umrechnen
             mat = self._body().get("matrix")
@@ -338,6 +402,13 @@ class Handler(SimpleHTTPRequestHandler):
                 m = db["map"]
                 m["track"] = [list(transform_xz(mat, x, z)) for x, z in m["track"]]
                 m["walls"] = [list(transform_xz(mat, w[0], w[1]) + transform_xz(mat, w[2], w[3])) for w in m["walls"]]
+                old_grid, m["grid"] = m["grid"], {}
+                cells = []
+                for key, (occ, free) in old_grid.items():
+                    ix, iz = map(int, key.split(","))
+                    x, z = transform_xz(mat, ix / 10, iz / 10)
+                    cells.append([round(x * 10), round(z * 10), occ, free])
+                merge_grid(db, cells)
                 merge_map(db, [], [])
                 save_db(db)
             print("[map] Karte auf neuen Heimat-Ankerpunkt umgerechnet", flush=True)
@@ -352,6 +423,10 @@ class Handler(SimpleHTTPRequestHandler):
                 print(f"[stt] Fehler: {err}", flush=True)
                 return self._json(502, {"error": str(err)})
             print(f"[stt] erkannt: {text!r}", flush=True)
+            if query.get("title", ["0"])[0] == "1":
+                title = make_title(text)
+                print(f"[title] {title!r}", flush=True)
+                return self._json(200, {"text": text, "title": title})
             return self._json(200, {"text": text})
         return self._json(404, {"error": "unbekannter Endpunkt"})
 
@@ -396,7 +471,7 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/map":
             with _lock:
                 db = load_db()
-                db["map"] = {"track": [], "walls": []}
+                db["map"] = {"track": [], "walls": [], "grid": {}}
                 save_db(db)
             print("[map] Karte zurückgesetzt", flush=True)
             return self._json(200, {"ok": True})
@@ -485,10 +560,12 @@ def main():
     parser.add_argument("--cert-mode", default="ssl-ordner")
     parser.add_argument("--stt-entity", default="")
     parser.add_argument("--language", default="de")
+    parser.add_argument("--title-agent", default="")
     parser.add_argument("--ingress-port", type=int, default=8099)
     parser.add_argument("--https-port", type=int, default=8443)
     args = parser.parse_args()
-    CFG.update(cert_mode=args.cert_mode, stt_entity=args.stt_entity.strip(), language=args.language.strip() or "de")
+    CFG.update(cert_mode=args.cert_mode, stt_entity=args.stt_entity.strip(), language=args.language.strip() or "de",
+               title_agent=args.title_agent.strip())
 
     os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
     os.makedirs(MEDIA_DIR, exist_ok=True)

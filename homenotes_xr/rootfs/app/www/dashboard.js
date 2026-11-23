@@ -53,6 +53,8 @@ async function setupXR() {
     $('xr-status').textContent = 'Bereit. Notizen und Videos erscheinen dort, wo du sie platziert hast.';
     $('start-ar').hidden = false;
     $('xr-options').hidden = false;
+    $('use-mapping').checked = localStorage.getItem('homenotes.mapping') !== '0';
+    $('use-mapping').onchange = () => localStorage.setItem('homenotes.mapping', $('use-mapping').checked ? '1' : '0');
     $('use-scan').checked = localStorage.getItem('homenotes.useScan') === '1';
     $('use-scan').onchange = () => localStorage.setItem('homenotes.useScan', $('use-scan').checked ? '1' : '0');
     $('space-mode').value = localStorage.getItem('homenotes.space') || 'unbounded';
@@ -63,7 +65,7 @@ async function setupXR() {
       try {
         xrModule ??= await import('./xr.js');
         xrModule.primeAudio(); // in der Klick-Geste, sonst bleibt das Mikrofon stumm
-        await xrModule.startXR({ useScan: $('use-scan').checked, space: $('space-mode').value, onEnd: () => refresh() });
+        await xrModule.startXR({ useScan: $('use-scan').checked, space: $('space-mode').value, mapping: $('use-mapping').checked, onEnd: () => refresh() });
       } catch (err) {
         remoteLog('error', `AR-Start fehlgeschlagen: ${err.message}`);
         alert(`AR konnte nicht starten: ${err.message}`);
@@ -221,50 +223,83 @@ function notePos(n, anchors) {
   return [H[0] * tx + H[4] * ty + H[8] * tz + H[12], H[2] * tx + H[6] * ty + H[10] * tz + H[14]];
 }
 
+let mapPins = [];
 async function renderMap() {
   let map;
   try { map = await api('map'); } catch (e) { remoteLog('error', e); return; }
   const pins = map.notes.map((n) => ({ n, p: notePos(n, map.anchors) })).filter((x) => x.p);
   const anchors = map.anchors.filter((a) => Array.isArray(a.home)).map((a) => ({ a, p: [a.home[12], a.home[14]] }));
-  $('map-stats').textContent = `${map.track.length} Wegpunkte · ${map.walls.length} Wände · ${pins.length} Einträge auf der Karte`;
+  const grid = map.grid || [];
+  const walls = grid.filter(([, , o, f]) => o >= 2 && o / (o + f) > 0.45).length;
+  $('map-stats').textContent = `${grid.length} Rasterzellen · ${walls} Wandzellen · ${pins.length} Einträge auf der Karte`;
   const xs = []; const zs = [];
+  for (const [ix, iz] of grid) { xs.push(ix / 10); zs.push(iz / 10); }
   for (const [x, z] of map.track) { xs.push(x); zs.push(z); }
   for (const w of map.walls) { xs.push(w[0], w[2]); zs.push(w[1], w[3]); }
   for (const { p } of [...pins, ...anchors]) { xs.push(p[0]); zs.push(p[1]); }
+  const box = $('map');
   if (!xs.length) {
-    $('map').innerHTML = '<div class="empty">Noch keine Karte. Sie entsteht im Headset beim Herumgehen, sobald die erste Notiz platziert ist. Mit Raum-Scan kommen auch Wände dazu.</div>';
+    box.innerHTML = '<div class="empty">Noch keine Karte. Sie entsteht im Headset beim Herumgehen, sobald die erste Notiz platziert ist: Der Tiefensensor tastet Wände und freie Flächen ab, mit jedem Rundgang wird der Grundriss genauer.</div>';
+    mapPins = [];
     return;
   }
-  const pad = 1;
-  const minX = Math.min(...xs) - pad; const maxX = Math.max(...xs) + pad;
-  const minZ = Math.min(...zs) - pad; const maxZ = Math.max(...zs) + pad;
+  const lo = (a) => a.reduce((m, v) => (v < m ? v : m), Infinity);
+  const hi = (a) => a.reduce((m, v) => (v > m ? v : m), -Infinity);
+  const pad = 0.8;
+  const minX = lo(xs) - pad; const maxX = hi(xs) + pad; const minZ = lo(zs) - pad; const maxZ = hi(zs) + pad;
   const w = Math.max(maxX - minX, 4); const h = Math.max(maxZ - minZ, 3);
-  const f = (v) => v.toFixed(2);
-  const parts = [];
-  // 1-m-Raster
-  for (let x = Math.ceil(minX); x <= maxX; x += 1) parts.push(`<line x1="${x}" y1="${f(minZ)}" x2="${x}" y2="${f(minZ + h)}" class="g"/>`);
-  for (let z = Math.ceil(minZ); z <= maxZ; z += 1) parts.push(`<line x1="${f(minX)}" y1="${z}" x2="${f(minX + w)}" y2="${z}" class="g"/>`);
-  for (const [x, z] of map.track) parts.push(`<rect x="${f(x - 0.15)}" y="${f(z - 0.15)}" width="0.3" height="0.3" class="t"/>`);
-  for (const [x1, z1, x2, z2] of map.walls) parts.push(`<line x1="${x1}" y1="${z1}" x2="${x2}" y2="${z2}" class="w"/>`);
+  let canvas = box.querySelector('canvas');
+  if (!canvas) { box.innerHTML = '<canvas></canvas><p class="hint legend">■ Wand/Möbel · <span style="color:#4dabf7">■</span> frei · ◆ Ankerpunkt (blau = Heimat) · ● Notiz · ▶ Video – Klick auf ein Symbol zeigt den Eintrag</p>'; canvas = box.querySelector('canvas'); canvas.onclick = onMapClick; }
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = box.clientWidth || 800;
+  const cssH = Math.min(560, Math.max(240, cssW * (h / w)));
+  canvas.style.width = `${cssW}px`; canvas.style.height = `${cssH}px`;
+  canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
+  const s = Math.min(cssW / w, cssH / h);
+  const ox = (cssW - w * s) / 2 - minX * s; const oz = (cssH - h * s) / 2 - minZ * s;
+  const X = (x) => ox + x * s; const Z = (z) => oz + z * s;
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  g.fillStyle = dark ? '#161a20' : '#f1f3f6'; g.fillRect(0, 0, cssW, cssH);
+  g.strokeStyle = dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'; g.lineWidth = 1;
+  for (let x = Math.ceil(minX); x <= maxX; x += 1) { g.beginPath(); g.moveTo(X(x), 0); g.lineTo(X(x), cssH); g.stroke(); }
+  for (let z = Math.ceil(minZ); z <= maxZ; z += 1) { g.beginPath(); g.moveTo(0, Z(z)); g.lineTo(cssW, Z(z)); g.stroke(); }
+  const cs = Math.max(1, 0.1 * s);
+  if (!grid.length) { g.fillStyle = 'rgba(77,171,247,0.3)'; for (const [x, z] of map.track) g.fillRect(X(x) - 0.15 * s, Z(z) - 0.15 * s, 0.3 * s, 0.3 * s); }
+  for (const [ix, iz, o, f] of grid) {
+    const pOcc = o / (o + f);
+    if (o >= 2 && pOcc > 0.45) g.fillStyle = dark ? '#e9ecef' : '#343a40';
+    else if (f >= 1 && pOcc < 0.3) g.fillStyle = 'rgba(77,171,247,0.28)';
+    else continue;
+    g.fillRect(X(ix / 10) - cs / 2, Z(iz / 10) - cs / 2, cs, cs);
+  }
+  g.strokeStyle = '#f59f00'; g.lineWidth = Math.max(2, 0.06 * s); g.lineCap = 'round';
+  for (const [x1, z1, x2, z2] of map.walls) { g.beginPath(); g.moveTo(X(x1), Z(z1)); g.lineTo(X(x2), Z(z2)); g.stroke(); }
   for (const { a, p } of anchors) {
-    parts.push(`<path d="M${f(p[0])} ${f(p[1] - 0.18)} l0.18 0.18 l-0.18 0.18 l-0.18 -0.18z" class="${a.isHome ? 'home' : 'a'}"><title>${a.isHome ? 'Heimat-Ankerpunkt' : 'Ankerpunkt'}</title></path>`);
+    const r = 7; g.fillStyle = a.isHome ? '#2f6fde' : '#868e96';
+    g.beginPath(); g.moveTo(X(p[0]), Z(p[1]) - r); g.lineTo(X(p[0]) + r, Z(p[1])); g.lineTo(X(p[0]), Z(p[1]) + r); g.lineTo(X(p[0]) - r, Z(p[1])); g.fill();
   }
+  mapPins = [];
   for (const { n, p } of pins) {
-    const fill = n.type === 'video' ? '#e8590c' : (n.done ? '#adb5bd' : (n.color || COLORS[0]));
-    const shape = n.type === 'video'
-      ? `<path d="M${f(p[0] - 0.16)} ${f(p[1] - 0.2)} l0.36 0.2 l-0.36 0.2z" fill="${fill}" class="pin"/>`
-      : `<circle cx="${f(p[0])}" cy="${f(p[1])}" r="0.17" fill="${fill}" class="pin"/>`;
-    parts.push(`<g data-id="${escapeHtml(n.id)}" style="cursor:pointer">${shape}<title>${escapeHtml(n.text || n.type)}</title></g>`);
+    const px = X(p[0]); const pz = Z(p[1]);
+    g.fillStyle = n.type === 'video' ? '#e8590c' : (n.done ? '#adb5bd' : (n.color || COLORS[0]));
+    g.strokeStyle = '#222'; g.lineWidth = 1.5;
+    g.beginPath();
+    if (n.type === 'video') { g.moveTo(px - 8, pz - 10); g.lineTo(px + 11, pz); g.lineTo(px - 8, pz + 10); g.closePath(); } else g.arc(px, pz, 8, 0, Math.PI * 2);
+    g.fill(); g.stroke();
+    mapPins.push({ id: n.id, x: px, z: pz, text: n.text });
   }
-  $('map').innerHTML = `<svg viewBox="${f(minX)} ${f(minZ)} ${f(w)} ${f(h)}" role="img" aria-label="Hauskarte">
-    <style>.g{stroke:rgba(127,127,127,.18);stroke-width:.02}.t{fill:rgba(77,171,247,.28)}.w{stroke:currentColor;stroke-width:.08;stroke-linecap:round}
-    .a{fill:#868e96}.home{fill:#2f6fde}.pin{stroke:#222;stroke-width:.03}</style>${parts.join('')}</svg>`;
-  $('map').querySelectorAll('g[data-id]').forEach((g) => {
-    g.onclick = () => {
-      const card = document.querySelector(`[data-note="${g.dataset.id}"]`);
-      if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.classList.add('flash'); setTimeout(() => card.classList.remove('flash'), 1600); }
-    };
-  });
+  canvas.title = '';
+}
+
+function onMapClick(e) {
+  const r = e.currentTarget.getBoundingClientRect();
+  const x = e.clientX - r.left; const z = e.clientY - r.top;
+  const pin = mapPins.map((p) => ({ ...p, d: Math.hypot(p.x - x, p.z - z) })).sort((a, b) => a.d - b.d)[0];
+  if (!pin || pin.d > 16) return;
+  const card = document.querySelector(`[data-note="${pin.id}"]`);
+  if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.classList.add('flash'); setTimeout(() => card.classList.remove('flash'), 1600); }
 }
 
 function visible(n) {
@@ -302,6 +337,7 @@ function card(n) {
       ${video}
       <textarea rows="2" aria-label="Text">${escapeHtml(n.text)}</textarea>
       <input class="loc" placeholder="Ort" value="${escapeHtml(n.location || '')}">
+      ${n.transcript ? `<details class="transcript"><summary>Transkript</summary><p>${escapeHtml(n.transcript)}</p></details>` : ''}
       <div class="meta"><span>${n.type === 'video' ? `🎬 Video ${fmtDuration(n.media?.duration)}` : '📝 Post-it'}</span><span>${placed}</span><span>${when}</span></div>
     </div>
     <div class="actions">

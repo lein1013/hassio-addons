@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+- Menü am linken Controller mit beschrifteten Knöpfen: ＋ Notiz · 🎙 Diktat · 🎬 Video · 📋 Übersicht ·
+  🗺 Karte · 🎨 Farbe. X blendet das Menü aus/ein (startet keine Aufnahme mehr).
+- Video-Rekorder als eigener Ablauf: Aufnahme starten → Stopp & behalten / Verwerfen → Ansehen,
+  Titel sprechen, Neu aufnehmen, Verwerfen → mit Trigger platzieren.
+- Video-Titel automatisch: Das Gesprochene der Aufnahme wird erkannt; ein Kurztitel entsteht über den
+  Konversationsagenten von Home Assistant (Option `title_agent`, Standard: erster eigener Agent, z. B. Ollama),
+  sonst aus dem ersten Satz. Transkript in der Übersicht. Titelzeile antippen = Titel sprechen.
+- Notiz antippen = Text sprechen.
+- Grundriss per Tiefensensor: ein Fächer aus Treffertest-Strahlen tastet beim Herumgehen Wände und
+  freie Flächen ab (10-cm-Belegungsraster, wird mit jedem Rundgang genauer). Ohne Raum-Scan.
+- Notizen haften beim Platzieren an Wänden/Möbeln, wenn diese näher als der Vorschau-Abstand sind.
+- Übersicht in Mixed Reality: Liste mit Filter, abhaken, ➜ Zeigen (gelbe Linie), als Nächstes platzieren, löschen.
+- Karte frei positionierbar: mit Grip greifen; Modi 👁 folgt dem Blick (an der gewählten Stelle) · 📌 fix im Raum ·
+  ✋ am Controller · ✕ aus.
+- Übersicht am PC: Grundriss als Rasterbild mit Wänden, freien Flächen, Ankerpunkten und Einträgen.
+
 ## 0.3.1
 
 - Bewegungsbereich „Ganze Wohnung“ (WebXR-Referenzraum `unbounded`) als Standard: Der

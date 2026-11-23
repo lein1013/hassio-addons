@@ -74,3 +74,7 @@ textarea { width: 100%; resize: vertical; }
 .note.flash { outline: 3px solid var(--accent); }
 .help label { display: block; margin-top: 8px; }
 .help label select { display: block; margin-top: 4px; max-width: 100%; }
+.map canvas { display: block; border-radius: 10px; cursor: pointer; }
+.map .legend { margin: 6px 0 0; }
+.transcript { font-size: 13px; color: var(--muted); }
+.transcript p { margin: 4px 0 0; white-space: pre-wrap; }

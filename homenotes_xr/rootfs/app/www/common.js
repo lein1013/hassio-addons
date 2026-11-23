@@ -58,14 +58,22 @@ export class SpeechRecorder {
     return this.stream;
   }
 
-  async start() {
+  // stream: optional fremder Stream (z. B. Ton der Video-Aufnahme); maxSeconds begrenzt die Länge
+  async start(stream = null, maxSeconds = 60) {
     this.prime();
-    await this.ensureStream();
+    const source = stream ?? await this.ensureStream();
     if (this.ctx.state === 'suspended') await this.ctx.resume();
     this.chunks = [];
-    this.src = this.ctx.createMediaStreamSource(this.stream);
+    const maxSamples = maxSeconds * this.ctx.sampleRate;
+    let count = 0;
+    this.src = this.ctx.createMediaStreamSource(source);
     this.proc = this.ctx.createScriptProcessor(4096, 1, 1);
-    this.proc.onaudioprocess = (e) => { if (this.active) this.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+    this.proc.onaudioprocess = (e) => {
+      if (!this.active || count >= maxSamples) return;
+      const data = new Float32Array(e.inputBuffer.getChannelData(0));
+      count += data.length;
+      this.chunks.push(data);
+    };
     this.src.connect(this.proc);
     this.proc.connect(this.ctx.destination);
     this.active = true;
@@ -117,11 +125,11 @@ function encodeWav(samples, rate) {
   return new Blob([buf], { type: 'audio/wav' });
 }
 
-export async function transcribe(wavBlob) {
-  const res = await fetch('api/stt', { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wavBlob });
+export async function transcribe(wavBlob, { title = false } = {}) {
+  const res = await fetch(`api/stt${title ? '?title=1' : ''}`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wavBlob });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Spracherkennung: HTTP ${res.status}`);
-  return data.text || '';
+  return title ? data : (data.text || '');
 }
 
 // ------------------------------------------------------------------ Video

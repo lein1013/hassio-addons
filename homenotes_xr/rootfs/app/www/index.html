@@ -38,6 +38,7 @@
       </div>
       <details class="help">
         <summary>Erweitert</summary>
+        <label class="check"><input type="checkbox" id="use-mapping"> Grundriss erfassen (Tiefensensor tastet beim Herumgehen Wände ab – Karte wird mit jedem Rundgang genauer)</label>
         <label class="check"><input type="checkbox" id="use-scan"> Raum-Scan verwenden (Notizen haften an Wänden/Möbeln, Wände erscheinen auf der Karte – die Quest fragt nach der Raumeinrichtung)</label>
         <label>Bewegungsbereich
           <select id="space-mode">
@@ -50,12 +51,14 @@
       <details class="help">
         <summary>Steuerung im Headset</summary>
         <table>
-          <tr><td>Menü am linken Controller</td><td>Mit dem rechten Strahl zeigen + Trigger: ＋ Notiz · 🎙 Diktat · ● Video · 🗺 Karte · ▦ Scan-Anzeige</td></tr>
-          <tr><td>Auf Notiz zeigen</td><td>Aktionsleiste erscheint: ✓ abhaken · 🎙 Text sprechen · ✥ verschieben · 🎨 Farbe · 🗑 löschen (2×)</td></tr>
-          <tr><td>Auf Video zeigen</td><td>▶ abspielen · 🎙 Titel · ✥ verschieben · 🗑 löschen</td></tr>
-          <tr><td>Trigger ins Leere</td><td>Nächstes aus der Warteschlange platzieren (Vorschau am Strahl)</td></tr>
-          <tr><td>Rechter Stick</td><td>Abstand der Vorschau / beim Verschieben näher-weiter</td></tr>
-          <tr><td>Abkürzungen</td><td>A halten: diktieren · B 2×: löschen · Grip: greifen · X: Video · Y: Farbe · linker Stick drücken: Karte</td></tr>
+          <tr><td>Menü (linker Controller)</td><td>Mit dem rechten Strahl zeigen + Trigger: ＋ Notiz · 🎙 Diktat · 🎬 Video · 📋 Übersicht · 🗺 Karte · 🎨 Farbe. X blendet das Menü aus/ein.</td></tr>
+          <tr><td>🎬 Video</td><td>Eigener Ablauf: ● Aufnahme starten → ■ Stopp &amp; behalten oder ✕ Verwerfen → ▶ Ansehen · 🎙 Titel sprechen · ↺ Neu · 🗑 Verwerfen → mit Trigger ins Leere platzieren. Der Titel wird aus dem Gesprochenen abgeleitet.</td></tr>
+          <tr><td>Notiz antippen</td><td>Text sprechen (Trigger beendet). Aktionsleiste: ✓ abhaken · 🎙 · ✥ verschieben · 🎨 · 🗑 (2×)</td></tr>
+          <tr><td>Video</td><td>Bild antippen = Play/Pause · Titelzeile antippen = Titel sprechen</td></tr>
+          <tr><td>📋 Übersicht</td><td>Liste aller Einträge im Raum: ✓ abhaken · ➜ Zeigen (gelbe Linie) · 📍 als Nächstes platzieren · 🗑 löschen</td></tr>
+          <tr><td>🗺 Karte</td><td>Kopfzeile: 👁 folgt dem Blick · 📌 fix im Raum · ✋ am Controller · ✕ aus. Mit Grip greifen und dorthin schieben, wo du sie haben willst.</td></tr>
+          <tr><td>Trigger ins Leere</td><td>Nächstes aus der Warteschlange platzieren (haftet an Wänden, sonst frei; rechter Stick = Abstand)</td></tr>
+          <tr><td>Abkürzungen</td><td>A halten: diktieren · B 2×: löschen · Grip: greifen · Y: Farbe · linken Stick drücken: Karte ein/aus</td></tr>
         </table>
       </details>
     </div>

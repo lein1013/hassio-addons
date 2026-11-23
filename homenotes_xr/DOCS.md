@@ -13,37 +13,28 @@ Home-Assistant-Seitenleiste unter **Home Notes**.
 
 ## Steuerung im Headset
 
-**Menü am linken Controller** (mit dem rechten Strahl zeigen, Trigger drücken):
-＋ Notiz · 🎙 Diktat · ● Video · 🗺 Karte (oben rechts → am rechten Controller → aus) · ▦ Scan-Anzeige
+**Menü am linken Controller** – mit dem rechten Strahl zeigen und Trigger drücken:
+＋ Notiz · 🎙 Diktat · 🎬 Video · 📋 Übersicht · 🗺 Karte · 🎨 Farbe. X blendet das Menü aus und ein.
 
-**Auf eine Notiz zeigen** – die Aktionsleiste erscheint:
-✓ abhaken · 🎙 Text sprechen (Trigger beendet) · ✥ verschieben (Trigger setzt ab) · 🎨 Farbe · 🗑 löschen (zweimal)
+**🎬 Video-Anleitung:** ● Aufnahme starten → ■ Stopp & behalten oder ✕ Verwerfen → ▶ Ansehen ·
+🎙 Titel sprechen · ↺ Neu aufnehmen · 🗑 Verwerfen → mit dem Trigger ins Leere platzieren.
+Erkläre beim Filmen, was du tust: Daraus entstehen Titel und Transkript.
 
-**Auf ein Video zeigen:** ▶ abspielen · 🎙 Titel · ✥ verschieben · 🗑 löschen
+**Notizen:** antippen = Text sprechen (Trigger beendet). Aktionsleiste darunter:
+✓ abhaken · 🎙 · ✥ verschieben · 🎨 Farbe · 🗑 löschen (zweimal).
+**Videos:** Bild antippen = Play/Pause, Titelzeile antippen = Titel sprechen.
 
-**Trigger ins Leere** platziert das Nächste aus der Warteschlange (Vorschau am Strahl,
-Abstand mit dem rechten Stick).
+**📋 Übersicht:** Liste aller Einträge – ✓ abhaken, ➜ Zeigen (gelbe Linie zur Notiz),
+📍 als Nächstes platzieren, 🗑 löschen. Mit Grip verschieben.
 
-Abkürzungen: A halten = diktieren · B 2× = löschen · Grip = greifen · X = Video · Y = Farbe ·
-linken Stick drücken = Karte.
+**🗺 Karte:** Kopfzeile 👁 folgt dem Blick · 📌 fix im Raum · ✋ am Controller · ✕ aus.
+Mit Grip greifen und dorthin schieben, wo du sie haben willst – im Modus „folgt“ merkt sie sich die Stelle.
 
-**Bewegungsbereich „Ganze Wohnung“ (Standard):** keine Begrenzung, du kannst frei durch alle Räume gehen.
-Falls die Quest trotzdem eine Begrenzung verlangt: unter „Erweitert“ prüfen, ob „Ganze Wohnung“ gewählt ist,
-oder im Entwicklermodus der Quest die Begrenzung ausschalten.
-**Ohne Raum-Scan (Standard):** keine Raumeinrichtung nötig.
-**Mit Raum-Scan** (unter „Erweitert“): Notizen haften an Wänden und Möbeln, Wände erscheinen auf der Karte.
+Abkürzungen: A halten = diktieren · B 2× = löschen · Grip = greifen · Y = Farbe ·
+linken Stick drücken = Karte ein/aus. Rechter Stick = Abstand der Vorschau.
 
-## Video-Anleitungen
-
-Auf der Startseite „Kamera & Mikrofon freigeben“ tippen und in der Liste die Kamera wählen,
-deren Vorschau dein Zimmer zeigt. Die „virtuelle Kamera“ der Quest zeigt in Mixed Reality nur Schwarz.
-
-## Hauskarte
-
-Der erste Ankerpunkt ist die Heimat der Karte. Während du im Headset herumgehst, werden
-deine Wege (10-cm-Raster) gespeichert, mit Raum-Scan auch Wände. Notizen erscheinen als
-Punkte, Videos als Dreiecke. In der Übersicht gibt es die Draufsicht; ein Klick auf einen
-Punkt springt zur Karte der Notiz.
+**Bewegungsbereich „Ganze Wohnung“ (Standard):** keine Begrenzung, frei durch alle Räume gehen.
+**Grundriss erfassen (Standard an):** Der Tiefensensor tastet beim Herumgehen Wände ab – ohne Raum-Scan.
 
 ## Warteschlange
 
@@ -64,6 +55,8 @@ freigegeben.
 - `stt_entity`: Spracherkennung, z. B. `stt.home_assistant_cloud`. Leer = automatisch
   (Home Assistant Cloud bevorzugt).
 - `language`: Sprache für die Spracherkennung (Standard `de`).
+- `title_agent`: Konversationsagent für Video-Titel, z. B. `conversation.ollama_conversation`.
+  Leer = automatisch, `aus` = nur erster Satz des Transkripts.
 
 ## Daten
 

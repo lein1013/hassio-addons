@@ -1,6 +1,6 @@
 ---
 name: Home Notes XR
-version: "0.3.1"
+version: "0.4.0"
 slug: homenotes_xr
 description: >-
   Virtuelle Post-its und Video-Anleitungen in der Wohnung – Mixed Reality mit Meta Quest
@@ -28,8 +28,10 @@ options:
   keyfile: privkey.pem
   stt_entity: ""
   language: de
+  title_agent: ""
 schema:
   certfile: str
   keyfile: str
   stt_entity: str?
   language: str
+  title_agent: str?
